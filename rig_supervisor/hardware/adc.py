@@ -4,6 +4,7 @@ The Raspberry Pi has NO analog input, so the thermistor voltage dividers must be
 read through an external ADC:
 
   * ADS1115 (I²C, 16 bit, 4 channels)  - needs ``python3-smbus`` or ``smbus2``
+  * ADS1220 (SPI, 24 bit, 4 channels)  - needs ``python3-spidev``
   * MCP3008 (SPI, 10 bit, 8 channels)  - needs ``python3-spidev``
   * MCP3208 (SPI, 12 bit, 8 channels)  - needs ``python3-spidev``
 """
@@ -144,6 +145,82 @@ class MCP3x08(BaseADC):
             pass
 
 
+class ADS1220(BaseADC):
+    """TI ADS1220, 24 bit delta-sigma ADC (SPI mode 1).
+
+    Every channel is measured single-ended (AINx - AVSS) with the PGA bypassed
+    (gain 1, rail-to-rail input).  Default reference: AVDD - so when the
+    thermistor dividers are fed from the same supply as AVDD the measurement is
+    ratiometric (independent of the exact supply voltage).
+    """
+
+    name = "ADS1220"
+    channels = 4
+    CMD_RESET, CMD_START, CMD_RDATA, CMD_WREG, CMD_RREG = 0x06, 0x08, 0x10, 0x40, 0x20
+    _VREF_BITS = {"internal": 0b00, "external": 0b01, "avdd": 0b11}
+
+    def __init__(self, bus: int = 0, device: int = 0, ref: str = "avdd", vref: float = 3.3,
+                 speed_hz: int = 1000000):
+        try:
+            import spidev  # type: ignore
+        except ImportError:
+            raise ADCError("hiányzik a spidev könyvtár (sudo apt install python3-spidev)")
+        self.ref = ref
+        self.vref = 2.048 if ref == "internal" else float(vref)
+        self._lock = threading.Lock()
+        self.spi = spidev.SpiDev()
+        try:
+            self.spi.open(bus, device)
+        except (OSError, IOError) as exc:
+            raise ADCError("az SPI eszköz (/dev/spidev%d.%d) nem nyitható meg - engedélyezd az SPI-t (%s)"
+                           % (bus, device, exc))
+        self.spi.max_speed_hz = speed_hz
+        self.spi.mode = 1  # CPOL=0, CPHA=1
+        try:
+            self.spi.xfer2([self.CMD_RESET])
+            time.sleep(0.002)
+            # reg1: 45 SPS, normal mode, single-shot; reg2: reference, no FIR, no IDAC; reg3: 0
+            self._reg1 = 0x20
+            self._reg2 = self._VREF_BITS[ref] << 6
+            self._write_regs(self._mux_reg0(0), self._reg1, self._reg2, 0x00)
+            back = self.spi.xfer2([self.CMD_RREG | 3, 0, 0, 0, 0])[1:]
+        except (OSError, IOError) as exc:
+            raise ADCError("SPI kommunikációs hiba: %s" % exc)
+        if back[1] != self._reg1 or back[2] != self._reg2:
+            raise ADCError("az ADS1220 nem válaszol (visszaolvasott regiszterek: %s) - ellenőrizd a bekötést"
+                           % " ".join("%02X" % b for b in back))
+
+    @staticmethod
+    def _mux_reg0(channel: int) -> int:
+        # MUX = 1000 + ch (AINx - AVSS), gain 1, PGA bypass
+        return ((0x8 + channel) << 4) | 0x01
+
+    def _write_regs(self, *regs):
+        self.spi.xfer2([self.CMD_WREG | (len(regs) - 1)] + list(regs))
+
+    def read(self, channel):
+        if not 0 <= channel <= 3:
+            raise ADCError("érvénytelen ADS1220 csatorna: %d" % channel)
+        with self._lock:
+            try:
+                self.spi.xfer2([self.CMD_WREG | 0, self._mux_reg0(channel)])
+                self.spi.xfer2([self.CMD_START])
+                time.sleep(0.030)  # 45 SPS single-shot conversion (~22 ms) + margin
+                r = self.spi.xfer2([self.CMD_RDATA, 0, 0, 0])
+            except (OSError, IOError) as exc:
+                raise ADCError("SPI kommunikációs hiba: %s" % exc)
+        raw = (r[1] << 16) | (r[2] << 8) | r[3]
+        if raw & 0x800000:
+            raw -= 1 << 24
+        return raw * self.vref / float(1 << 23), raw >= 0x7FFFFF
+
+    def close(self):
+        try:
+            self.spi.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class SimADC(BaseADC):
     name = "szimulált ADC"
     channels = 8
@@ -167,6 +244,10 @@ def create_adc(adc_cfg: dict, supply_v: float, sim_world=None):
         if kind == "ads1115":
             full_scale = 6.144 if supply_v > 4.0 else 4.096
             return ADS1115(int(adc_cfg["i2c_bus"]), int(adc_cfg["i2c_address"]), full_scale), None
+        if kind == "ads1220":
+            ref = adc_cfg.get("ref", "avdd")
+            vref = supply_v if ref == "avdd" else float(adc_cfg["vref"])
+            return ADS1220(int(adc_cfg["spi_bus"]), int(adc_cfg["spi_device"]), ref, vref), None
         if kind in ("mcp3008", "mcp3208"):
             return MCP3x08(10 if kind == "mcp3008" else 12, int(adc_cfg["spi_bus"]),
                            int(adc_cfg["spi_device"]), float(adc_cfg["vref"])), None

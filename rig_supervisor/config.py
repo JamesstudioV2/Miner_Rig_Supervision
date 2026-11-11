@@ -46,6 +46,7 @@ GPIO_TO_PIN = {
 VALID_GPIOS = sorted(GPIO_TO_PIN)
 
 ADC_TYPES = {
+    "ads1220": {"label": "ADS1220 (SPI, 24 bit, 4 csatorna)", "channels": 4},
     "ads1115": {"label": "ADS1115 (I²C, 16 bit, 4 csatorna)", "channels": 4},
     "mcp3008": {"label": "MCP3008 (SPI, 10 bit, 8 csatorna)", "channels": 8},
     "mcp3208": {"label": "MCP3208 (SPI, 12 bit, 8 csatorna)", "channels": 8},
@@ -69,12 +70,15 @@ _DEFAULTS = {
         # auto: Raspberry Pi-n valódi hardver, máshol szimuláció | rpi | sim
         "backend": "auto",
         "adc": {
-            "type": "ads1115",
+            "type": "ads1220",
             "i2c_bus": 1,
             "i2c_address": 0x48,
             "spi_bus": 0,
             "spi_device": 0,
-            "vref": 3.3,       # MCP3x08 referencia feszültség (V)
+            "vref": 3.3,       # MCP3x08 / ADS1220 külső referencia feszültség (V)
+            # ADS1220 referencia: avdd = arányos mérés az AVDD táphoz (az osztó is erről megy) |
+            # internal = belső 2,048 V | external = REFP0/REFN0 lábak (feszültség: vref)
+            "ref": "avdd",
             "samples": 5,      # mérésenkénti minták száma (medián szűrés)
         },
         "divider": {
@@ -168,7 +172,7 @@ def bus_pins(adc_cfg: dict) -> dict:
         if int(adc_cfg.get("i2c_bus", 1)) == 1:
             return {2: "I²C SDA (ADC)", 3: "I²C SCL (ADC)"}
         return {}
-    if t in ("mcp3008", "mcp3208"):
+    if t in ("mcp3008", "mcp3208", "ads1220"):
         bus = int(adc_cfg.get("spi_bus", 0))
         dev = int(adc_cfg.get("spi_device", 0))
         if bus == 0:
@@ -276,7 +280,8 @@ def validate(cfg: dict):
     v.number(adc, "i2c_address", 0x48, 0x4B, "I²C cím", integer=True)
     v.number(adc, "spi_bus", 0, 1, "SPI busz", integer=True)
     v.number(adc, "spi_device", 0, 2, "SPI eszköz (CE)", integer=True)
-    v.number(adc, "vref", 1.0, 5.5, "ADC referencia feszültség", integer=False)
+    v.number(adc, "vref", 0.5, 5.5, "ADC referencia feszültség", integer=False)
+    v.choice(adc, "ref", ("avdd", "internal", "external"), "ADS1220 referencia")
     v.number(adc, "samples", 1, 32, "Minták száma", integer=True)
     div = hw["divider"]
     v.number(div, "supply_v", 1.0, 5.5, "Osztó tápfeszültség")

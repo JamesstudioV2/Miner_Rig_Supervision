@@ -49,6 +49,11 @@ class ConfigTest(unittest.TestCase):
 
     def test_bus_pin_conflict(self):
         cfg = C.default_config()
+        self.assertEqual(cfg["hardware"]["adc"]["type"], "ads1220")
+        cfg["hardware"]["io"]["flow1"]["gpio"] = 8  # SPI CE0 used by the ADS1220
+        _, errors = C.validate(cfg)
+        self.assertTrue(any("ADC buszhoz" in e for e in errors), errors)
+        cfg["hardware"]["adc"]["type"] = "ads1115"
         cfg["hardware"]["io"]["flow1"]["gpio"] = 2  # I2C SDA used by the ADS1115
         _, errors = C.validate(cfg)
         self.assertTrue(any("ADC buszhoz" in e for e in errors), errors)

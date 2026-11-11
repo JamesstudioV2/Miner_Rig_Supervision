@@ -31,28 +31,40 @@ a két vízkörös hűtőrendszert és a minereket:
 ### 1.1 A hőmérők (10 kΩ NTC) mérése: ADC kell!
 
 A Raspberry Pi-nek **nincs analóg bemenete**, ezért a termisztoros feszültségosztók feszültségét egy külső
-**ADC** (analóg-digitális átalakító) modulnak kell mérnie. Támogatott modulok:
+**ADC** méri. Az alapbeállítás az **ADS1220** modul (24 bit, 4 csatorna, **SPI** – a modul lábkiosztása is
+MISO/MOSI/SCLK/CS, tehát nem I²C-s, akármit ír a webshop leírása). Más ADC-k is választhatók
+(ADS1115 I²C, MCP3008/MCP3208 SPI) a **Beállítások › Kalibráció & GPIO** oldalon.
 
-| ADC | Csatlakozás | Csatorna | Megjegyzés |
-|-----|-------------|----------|------------|
-| **ADS1115** (ajánlott) | I²C (GPIO2 = SDA, GPIO3 = SCL) | 4 | 16 bit, pont 4 szenzorhoz elég, olcsó modul |
-| MCP3008 | SPI0 (GPIO9/10/11 + CE0/CE1) | 8 | 10 bit |
-| MCP3208 | SPI0 | 8 | 12 bit |
+| ADS1220 modul láb | Raspberry Pi | Megjegyzés |
+|-------------------|--------------|------------|
+| SCLK | GPIO11 (23. tű) | SPI0 órajel |
+| MOSI (DIN) | GPIO10 (19. tű) | |
+| MISO (DOUT) | GPIO9 (21. tű) | |
+| CS | GPIO8 / CE0 (24. tű) | |
+| DVDD | **3,3 V** (1. vagy 17. tű) | a logikai szint – a Pi nem 5 V-tűrő! |
+| DGND, AGND | GND | |
+| CLK | GND | belső órajel |
+| DRDY | – | nem szükséges (a program időzítéssel olvas) |
+| AVDD | **ugyanaz a táp, mint a termisztoros osztóké** (3,3 V vagy 5 V) | |
+| AIN0 / AIN1 / AIN2 / AIN3 | T1 / T2 / T3 / T4 osztó közös pontja | |
+| REFP0 / REFN0 | – | csak „külső referencia” módban |
 
-**A Pi lábai 3,3 V-osak és nem 5 V-tűrők!** Az osztót ezért érdemes **3,3 V-ról** táplálni (ugyanarról, amiről
-az ADC is kap tápot). Ekkor minden feszültség 0–3,3 V között marad, és a mérés a tápfeszültség ingadozására is
-érzéketlen. Ha az osztó 5 V-ról megy, akkor az ADS1115-öt is 5 V-ról kell táplálni (a modul I²C felhúzó
-ellenállásai ilyenkor ne 5 V-ra húzzanak), és a **Beállítások › Kalibráció & GPIO** oldalon be kell állítani,
-hogy az osztó tápja 5,00 V (gyári alapérték: 5,0 V, mert a leírás szerint most így van bekötve).
+A program a referenciát alapból az **AVDD**-re állítja (arányos mérés): mivel az osztó és az ADC ugyanarról a
+tápról megy, a mérés eredménye nem függ a táp pontos értékétől, és a tápfeszültség ingadozása sem okoz hibát.
+Így a mostani **5 V-os osztók is maradhatnak** – ekkor az AVDD-t is 5 V-ra kell kötni, a DVDD-t viszont
+3,3 V-ra. (Ha az osztókat 3,3 V-ról táplálod, az AVDD is 3,3 V legyen.)
 
 ```
- 3,3 V ──[ 10 kΩ fix ]──┬──────► ADS1115 A0 (T1), A1 (T2), A2 (T3), A3 (T4)
-                        │
-                   [ NTC 10 kΩ ]
-                        │
- GND ───────────────────┴──────► ADS1115 GND
- ADS1115: VDD → 3,3 V (1. tű), GND → GND, SDA → GPIO2 (3. tű), SCL → GPIO3 (5. tű), ADDR → GND (cím: 0x48)
+ AVDD-táp ──[ 10 kΩ fix ]──┬──────► ADS1220 AIN0 (T1) / AIN1 (T2) / AIN2 (T3) / AIN3 (T4)
+ (3,3 V vagy 5 V)          │
+                      [ NTC 10 kΩ ]
+                           │
+ GND ──────────────────────┴──────► ADS1220 AGND
 ```
+
+Mérés: egyvégű (AINx–AGND), PGA kikapcsolva (rail-to-rail bemenet), 45 minta/s, csatornánként 5 minta
+mediánja másodpercenként. Ellenőrzés a Pi-n: `ls /dev/spidev0.0` (ha nincs, engedélyezd az SPI-t:
+`sudo raspi-config` › Interface Options › SPI – a telepítő ezt automatikusan megteszi).
 
 A termisztor béta értékét (gyakran 3950 vagy 3435) a kalibrációs oldalon lehet megadni. A szenzor
 szakadását, rövidzárát és az ADC kommunikációs hibát a program felismeri és jelzi.
@@ -121,11 +133,8 @@ journalctl -u rig-supervisor -f
 sudo systemctl restart rig-supervisor
 ```
 
-```bash
-sudo i2cdetect -y 1
-```
-
-(az utolsó megmutatja, látja-e a Pi az ADS1115-öt – a 0x48 címen kell megjelennie)
+Ha az ADS1220 nem válaszol, a kalibrációs oldalon „az ADS1220 nem válaszol” hibaüzenet jelenik meg –
+ilyenkor ellenőrizd az SPI bekötést, a DVDD/AVDD tápot és a CS lábat (CE0 = GPIO8).
 
 **Frissítés:** `git pull`, majd újra `sudo ./install.sh` – a beállítások és a naplók (`/var/lib/rig-supervisor`)
 megmaradnak, a program újraindítása közben **a szivattyúk állapota nem változik**.
@@ -286,7 +295,7 @@ python3 -m unittest discover -s tests -t .
 ```
 rig_supervisor/
   controller.py      biztonsági vezérlő (állapotgép, védelmek, utóhűtés, kézi szivattyú, gombok)
-  hardware/          GPIO (RPi.GPIO / lgpio), ADC (ADS1115 / MCP3x08), NTC számítás, I/O kezelő, szimulátor
+  hardware/          GPIO (RPi.GPIO / lgpio), ADC (ADS1220 / ADS1115 / MCP3x08), NTC számítás, I/O kezelő, szimulátor
   miners/            LAN kommunikáció (CGMiner API, HTTP digest), firmware meghajtók, lekérdezés, hálózati keresés
   datalog.py         napi SQLite naplók, 10 GB-os korlát, grafikon lekérdezések
   events.py          eseménynapló

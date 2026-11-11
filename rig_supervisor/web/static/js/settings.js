@@ -433,7 +433,7 @@ export class SettingsView {
       const s = cfg.sensors[sid];
       return `<tr>
         <td><b>${sid.toUpperCase()}</b><div class="hint">${esc(s.short)}</div></td>
-        <td><select class="inp sm" data-path="sensors.${sid}.channel" data-type="int">${Array.from({ length: channels }, (_, c) => `<option value="${c}" ${c === s.channel ? 'selected' : ''}>${cfg.hardware.adc.type === 'ads1115' ? 'A' : 'CH'}${c}</option>`).join('')}</select></td>
+        <td><select class="inp sm" data-path="sensors.${sid}.channel" data-type="int">${Array.from({ length: channels }, (_, c) => `<option value="${c}" ${c === s.channel ? 'selected' : ''}>${{ ads1115: 'A', ads1220: 'AIN' }[cfg.hardware.adc.type] || 'CH'}${c}</option>`).join('')}</select></td>
         <td><input class="inp sm num" type="number" step="1" data-path="sensors.${sid}.r25" data-type="num" value="${s.r25}"></td>
         <td><input class="inp sm num" type="number" step="1" data-path="sensors.${sid}.beta" data-type="num" value="${s.beta}"></td>
         <td><input class="inp sm num" type="number" step="0.05" data-path="sensors.${sid}.offset" data-type="num" value="${s.offset}"></td>
@@ -460,19 +460,21 @@ export class SettingsView {
         <td class="live" data-pin="${name}">—</td></tr>`;
     }).join('');
     body.innerHTML = `<div id="calib">
-      <div class="note"><b>Fontos:</b> a Raspberry Pi-nek <b>nincs analóg bemenete</b>, ezért a 10 kΩ-os NTC termisztorok feszültségosztóit egy
-        ADC modulnak kell mérnie (ajánlott: <b>ADS1115</b> I²C – pont 4 csatornás; vagy MCP3008 SPI). A GPIO lábak 3,3 V-osak és nem 5 V-tűrők:
-        javasolt az osztókat is <b>3,3 V-ról</b> táplálni (az ADC tápjával azonos feszültségről) – ekkor a mérés arányos és pontos.
-        Ha 5 V-ot használsz, az ADS1115-öt is 5 V-ról kell táplálni, és állítsd be lent a tápfeszültséget.</div>
+      <div class="note"><b>Fontos:</b> a Raspberry Pi-nek <b>nincs analóg bemenete</b>, a 10 kΩ-os NTC osztókat az <b>ADS1220</b> (SPI, 24 bit) méri:
+        SCLK→GPIO11, DIN/MOSI→GPIO10, DOUT/MISO→GPIO9, CS→GPIO8 (CE0), <b>DVDD→3,3 V</b>, DGND/AGND→GND, CLK→GND (belső órajel), DRDY szabadon hagyható.
+        Az <b>AVDD</b> lábat ugyanarról a tápról kell táplálni, mint a termisztoros osztókat (3,3 V vagy 5 V) – „AVDD” referenciával a mérés
+        arányos, így a táp pontos értéke nem számít. A DVDD (logikai szint) mindig 3,3 V legyen, mert a Pi lábai nem 5 V-tűrők!</div>
       <div class="card">
         <div class="card-title">ADC és feszültségosztó <span class="muted" data-hw="adc-status"></span></div>
         <div class="form-grid">
           ${selectField(cfg, 'hardware.adc.type', 'ADC típus', adcTypes.map((a) => [a.id, a.label]))}
           ${selectField(cfg, 'hardware.adc.i2c_bus', 'I²C busz (ADS1115)', [[1, '1 (GPIO2/GPIO3)'], [0, '0']], 'int')}
           ${selectField(cfg, 'hardware.adc.i2c_address', 'I²C cím (ADS1115)', [[72, '0x48 (ADDR→GND)'], [73, '0x49 (ADDR→VDD)'], [74, '0x4A (ADDR→SDA)'], [75, '0x4B (ADDR→SCL)']], 'int')}
-          ${selectField(cfg, 'hardware.adc.spi_bus', 'SPI busz (MCP3x08)', [[0, 'SPI0'], [1, 'SPI1']], 'int')}
-          ${selectField(cfg, 'hardware.adc.spi_device', 'SPI chip select (MCP3x08)', [[0, 'CE0'], [1, 'CE1'], [2, 'CE2 (csak SPI1)']], 'int')}
-          ${numField(cfg, 'hardware.adc.vref', 'Referencia feszültség (MCP3x08)', 'V', { step: 0.01 })}
+          ${selectField(cfg, 'hardware.adc.spi_bus', 'SPI busz', [[0, 'SPI0'], [1, 'SPI1']], 'int')}
+          ${selectField(cfg, 'hardware.adc.spi_device', 'SPI chip select (CS)', [[0, 'CE0'], [1, 'CE1'], [2, 'CE2 (csak SPI1)']], 'int')}
+          ${selectField(cfg, 'hardware.adc.ref', 'Referencia (ADS1220)', [['avdd', 'AVDD – arányos mérés (ajánlott)'], ['internal', 'Belső 2,048 V'], ['external', 'Külső (REFP0/REFN0)']], 'text',
+            'AVDD esetén az osztót ugyanarról a tápról kell táplálni, mint az ADS1220 AVDD lábát.')}
+          ${numField(cfg, 'hardware.adc.vref', 'Referencia feszültség', 'V', { step: 0.01, hint: 'MCP3x08: a VREF láb feszültsége; ADS1220 külső referenciánál: REFP0−REFN0.' })}
           ${numField(cfg, 'hardware.adc.samples', 'Minták száma mérésenként', 'db', { step: 1, min: 1, max: 32, hint: 'Medián szűrés a zaj ellen.' })}
           ${numField(cfg, 'hardware.divider.supply_v', 'Osztó tápfeszültsége', 'V', { step: 0.01, hint: 'A fix ellenállás felső végén mért feszültség (pl. 3,30 vagy 5,00 V).' })}
           ${numField(cfg, 'hardware.divider.series_ohm', 'Fix ellenállás', 'Ω', { step: 1, hint: 'A táp és a mérőpont közötti ellenállás (10 000 Ω).' })}
@@ -499,19 +501,24 @@ export class SettingsView {
       ${actions('cb')}</div>`;
     const root = $('#calib');
     const adcFields = { 'hardware.adc.i2c_bus': 'i2c', 'hardware.adc.i2c_address': 'i2c', 'hardware.adc.spi_bus': 'spi',
-      'hardware.adc.spi_device': 'spi', 'hardware.adc.vref': 'spi' };
+      'hardware.adc.spi_device': 'spi', 'hardware.adc.vref': 'vref', 'hardware.adc.ref': 'ads1220' };
     const toggleAdc = () => {
       const type = root.querySelector('[data-path="hardware.adc.type"]').value;
-      const bus = type === 'ads1115' ? 'i2c' : (type === 'mcp3008' || type === 'mcp3208') ? 'spi' : 'none';
+      const bus = type === 'ads1115' ? 'i2c' : ['mcp3008', 'mcp3208', 'ads1220'].includes(type) ? 'spi' : 'none';
+      const refEl = root.querySelector('[data-path="hardware.adc.ref"]');
+      const show = {
+        i2c: bus === 'i2c', spi: bus === 'spi', ads1220: type === 'ads1220',
+        vref: type === 'mcp3008' || type === 'mcp3208' || (type === 'ads1220' && refEl && refEl.value === 'external'),
+      };
       for (const [path, kind] of Object.entries(adcFields)) {
         const el = root.querySelector(`[data-path="${path}"]`);
-        if (el) el.closest('.field').hidden = kind !== bus;
+        if (el) el.closest('.field').hidden = !show[kind];
       }
     };
     const redrawHeader = () => this._drawHeader(collect(root));
     root.addEventListener('change', (e) => {
       if (!e.target.dataset.path) return;
-      if (e.target.dataset.path === 'hardware.adc.type') toggleAdc();
+      if (e.target.dataset.path === 'hardware.adc.type' || e.target.dataset.path === 'hardware.adc.ref') toggleAdc();
       redrawHeader();
     });
     toggleAdc();
@@ -571,7 +578,7 @@ export class SettingsView {
     const adc = (values.hardware && values.hardware.adc) || {};
     const busByGpio = {};
     if (adc.type === 'ads1115' && +adc.i2c_bus === 1) { busByGpio.GPIO2 = 'SDA'; busByGpio.GPIO3 = 'SCL'; }
-    if ((adc.type === 'mcp3008' || adc.type === 'mcp3208')) {
+    if (['mcp3008', 'mcp3208', 'ads1220'].includes(adc.type)) {
       if (+adc.spi_bus === 0) {
         Object.assign(busByGpio, { GPIO9: 'MISO', GPIO10: 'MOSI', GPIO11: 'SCLK' });
         busByGpio[+adc.spi_device === 1 ? 'GPIO7' : 'GPIO8'] = 'CE' + (+adc.spi_device === 1 ? 1 : 0);
