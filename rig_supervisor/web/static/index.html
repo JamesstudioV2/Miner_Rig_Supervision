@@ -1,1 +1,176 @@
-<!doctype html><title>x</title>
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1016">
+<meta name="color-scheme" content="dark">
+<title>Rig Supervisor</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#ico-logo"/></svg>
+    <div class="brand-text">
+      <div class="brand-name" id="site-name">Bányatelep</div>
+      <div class="brand-sub">Rig Supervisor</div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs" aria-label="Fő menü">
+    <a href="#dashboard" data-tab="dashboard"><svg viewBox="0 0 24 24"><use href="#ico-dash"/></svg><span>Áttekintés</span></a>
+    <a href="#charts" data-tab="charts"><svg viewBox="0 0 24 24"><use href="#ico-chart"/></svg><span>Grafikonok</span></a>
+    <a href="#events" data-tab="events"><svg viewBox="0 0 24 24"><use href="#ico-list"/></svg><span>Események</span><b class="tab-badge" id="events-badge" hidden></b></a>
+    <a href="#settings" data-tab="settings"><svg viewBox="0 0 24 24"><use href="#ico-gear"/></svg><span>Beállítások</span></a>
+  </nav>
+  <div class="top-status">
+    <div class="state-pill" id="state-pill" data-state="unknown"><i></i><span>Kapcsolódás…</span></div>
+    <div class="conn" id="conn" title="Kapcsolat a vezérlővel"><i></i></div>
+  </div>
+</header>
+
+<div class="banner" id="sim-banner" hidden>SZIMULÁCIÓS MÓD – nincs valódi hardver csatlakoztatva, minden adat szimulált.</div>
+<div class="banner banner-err" id="conn-banner" hidden>Nincs kapcsolat a vezérlővel – az adatok nem frissülnek. Újracsatlakozás…</div>
+
+<main>
+  <!-- ======================= ÁTTEKINTÉS ======================= -->
+  <section class="view" id="view-dashboard" data-view="dashboard">
+    <div class="dash-grid">
+      <div class="dash-side">
+        <div class="card status-card" id="status-card">
+          <div class="status-head">
+            <div class="status-led" id="status-led"></div>
+            <div>
+              <div class="status-label" id="status-label">—</div>
+              <div class="status-since" id="status-since"></div>
+            </div>
+          </div>
+          <div class="status-phase" id="status-phase" hidden></div>
+          <div class="alarm" id="alarm-box" hidden>
+            <div class="alarm-top"><span class="alarm-code" id="alarm-code"></span><span class="alarm-time" id="alarm-time"></span></div>
+            <div class="alarm-title" id="alarm-title"></div>
+            <div class="alarm-msg" id="alarm-msg"></div>
+            <button class="btn btn-ghost btn-sm" id="btn-ack">Nyugtázás</button>
+          </div>
+          <div class="inhibit" id="inhibit-box" hidden></div>
+        </div>
+
+        <div class="card controls-card">
+          <div class="big-buttons">
+            <button class="big-btn big-start" id="btn-start"><svg viewBox="0 0 24 24"><use href="#ico-play"/></svg><span>INDÍTÁS</span></button>
+            <button class="big-btn big-stop" id="btn-stop"><svg viewBox="0 0 24 24"><use href="#ico-stop"/></svg><span>LEÁLLÍTÁS</span></button>
+          </div>
+          <div class="hold-title">Kézi légtelenítés <small>– csak leállított rendszernél, nyomva tartás alatt jár a szivattyú</small></div>
+          <div class="hold-buttons">
+            <button class="hold-btn" id="hold-pump1" data-pump="pump1"><span class="hold-ring"></span><b>P1</b><span>Belső kör</span><em>tartsd nyomva</em></button>
+            <button class="hold-btn" id="hold-pump2" data-pump="pump2"><span class="hold-ring"></span><b>P2</b><span>Külső kör</span><em>tartsd nyomva</em></button>
+          </div>
+        </div>
+
+        <div class="kpis" id="kpis"></div>
+
+        <div class="card warn-card" id="warn-card">
+          <div class="card-title">Figyelmeztetések</div>
+          <div id="warn-list" class="warn-list"></div>
+        </div>
+      </div>
+
+      <div class="dash-main">
+        <div class="card diagram-card">
+          <div class="card-title">Hűtőrendszer <span class="legend" id="temp-legend"></span></div>
+          <div class="diagram" id="diagram" role="img" aria-label="A hűtőrendszer sematikus ábrája"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Minerek <span class="muted" id="miners-count"></span></div>
+          <div class="miner-grid" id="miner-grid"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Legutóbbi események <a href="#events" class="link-sm">összes →</a></div>
+          <div class="event-list compact" id="recent-events"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= GRAFIKONOK ======================= -->
+  <section class="view" id="view-charts" data-view="charts" hidden>
+    <div class="card range-card">
+      <div class="range-bar">
+        <div class="seg" id="range-presets">
+          <button data-range="3600">1 óra</button>
+          <button data-range="21600">6 óra</button>
+          <button data-range="86400">24 óra</button>
+          <button data-range="259200">3 nap</button>
+          <button data-range="604800">7 nap</button>
+          <button data-range="2592000">30 nap</button>
+          <button data-range="7776000">90 nap</button>
+          <button data-range="31536000">1 év</button>
+        </div>
+        <div class="range-nav">
+          <button class="btn btn-icon" id="range-prev" title="Korábbi időszak">‹</button>
+          <button class="btn btn-icon" id="range-next" title="Későbbi időszak">›</button>
+          <button class="btn btn-sm" id="range-now">Most</button>
+        </div>
+      </div>
+      <div class="range-custom">
+        <label>Kezdete <input type="datetime-local" id="range-from"></label>
+        <label>Vége <input type="datetime-local" id="range-to"></label>
+        <button class="btn btn-sm" id="range-apply">Mutasd</button>
+        <label class="chk"><input type="checkbox" id="range-live" checked> Élő frissítés</label>
+        <a class="btn btn-sm btn-ghost" id="csv-link" href="#" download>CSV letöltés</a>
+      </div>
+      <div class="range-info" id="range-info"></div>
+    </div>
+    <div id="charts"></div>
+  </section>
+
+  <!-- ======================= ESEMÉNYEK ======================= -->
+  <section class="view" id="view-events" data-view="events" hidden>
+    <div class="card">
+      <div class="card-title">Eseménynapló
+        <div class="seg seg-sm" id="event-filter">
+          <button data-level="" class="active">Mind</button>
+          <button data-level="warning">Figyelm. + hiba</button>
+          <button data-level="error">Hibák</button>
+          <button data-level="info">Info</button>
+        </div>
+      </div>
+      <div class="event-list" id="event-list"></div>
+      <div class="center"><button class="btn btn-sm" id="events-more">Régebbiek betöltése</button></div>
+    </div>
+    <details class="card codes-card">
+      <summary class="card-title">Hibakódok jegyzéke</summary>
+      <div id="code-table"></div>
+    </details>
+  </section>
+
+  <!-- ======================= BEÁLLÍTÁSOK ======================= -->
+  <section class="view" id="view-settings" data-view="settings" hidden>
+    <div class="seg settings-nav" id="settings-nav">
+      <button data-sub="miners" class="active">Minerek</button>
+      <button data-sub="protect">Védelmek</button>
+      <button data-sub="calib">Kalibráció &amp; GPIO</button>
+      <button data-sub="system">Rendszer</button>
+    </div>
+    <div id="settings-body"></div>
+  </section>
+</main>
+
+<div class="modal-root" id="modal-root"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ico-logo" viewBox="0 0 32 32"><rect x="3" y="3" width="26" height="26" rx="7" fill="#0ea5e9" opacity=".15"/><path d="M16 6c3.6 4.6 6.5 8.3 6.5 12a6.5 6.5 0 1 1-13 0C9.5 14.3 12.4 10.6 16 6z" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linejoin="round"/><path d="M12.5 19.5a3.6 3.6 0 0 0 3.5 3" fill="none" stroke="#f97316" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="ico-dash" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="ico-chart" viewBox="0 0 24 24"><path d="M4 19h16M5 15l4-5 4 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="ico-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="ico-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+    <symbol id="ico-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z" fill="currentColor"/></symbol>
+    <symbol id="ico-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></symbol>
+  </defs>
+</svg>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

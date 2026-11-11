@@ -595,6 +595,8 @@ class Controller:
                     "start_allowed": self.state not in ACTIVE_STATES and inhibit is None,
                     "stop_allowed": True,
                     "manual_allowed": self.state in (STOPPED, EMERGENCY),
+                    "start_delay": sf["miner_start_delay_s"],
+                    "post_stop": sf["post_stop_pump_s"],
                 },
                 "pumps": {p: {"on": self.pumps[p], "manual": self.manual[p] is not None,
                               "assist": self.assist["active"]} for p in ("pump1", "pump2")},

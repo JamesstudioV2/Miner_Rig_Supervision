@@ -234,6 +234,9 @@ def make_handler(app):
             m = re.match(r"^miners/([A-Za-z0-9_-]+)/(start|stop|reboot)$", "/".join(parts))
             if method == "POST" and m:
                 self._read_json()
+                if m.group(2) in ("start", "reboot") and app.controller.state != "running":
+                    raise HttpError(409, "Miner csak üzemelő rendszernél (járó szivattyúk mellett) indítható vagy "
+                                         "indítható újra")
                 ok, msg = app.miners.command_one(m.group(1), m.group(2), source="web")
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 400)
             raise HttpError(404, "Ismeretlen API végpont")
@@ -450,6 +453,11 @@ def make_handler(app):
                 result = app.datalog.history(start, end, points)
             except ValueError as exc:
                 raise HttpError(400, str(exc))
+            order = {m["id"]: i for i, m in enumerate(app.config.data["miners"]["list"])}
+            names = {m["id"]: m["name"] for m in app.config.data["miners"]["list"]}
+            for m in result["miners"]:
+                m["name"] = names.get(m["id"], m["name"] + " (törölt)")
+            result["miners"].sort(key=lambda m: (order.get(m["id"], 10 ** 6), m["name"]))
             result["ok"] = True
             self._json(result)
 

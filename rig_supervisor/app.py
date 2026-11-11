@@ -57,6 +57,9 @@ class App:
     def start(self, host: str = "0.0.0.0") -> None:
         from .web.server import WebServer
 
+        # the web port is bound first: a port conflict must not leave a half started controller behind
+        self.web = WebServer(self, host, self.port)
+        self.port = self.web.port
         self.events.add("info", "Program indítása (v%s)%s" % (
             __version__, " – SZIMULÁCIÓS MÓD (nincs valódi hardver)" if self.simulated else ""), source="rendszer")
         self.io.start(self.controller.initial_outputs())
@@ -65,8 +68,6 @@ class App:
         self.miners.start()
         self.controller.start()
         self.datalog.start()
-        self.web = WebServer(self, host, self.port)
-        self.port = self.web.port
         self.web.start()
         log.info("Webes felület: http://%s:%d/", host if host != "0.0.0.0" else "<raspberry-ip>", self.port)
 
