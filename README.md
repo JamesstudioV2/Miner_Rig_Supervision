@@ -84,6 +84,17 @@ Minden láb és aktív szint a webes felületen módosítható (**Beállítások
 40 tűs csatlakozó ábra is mutatja a foglalt lábakat. A program ellenőrzi az ütközéseket (két funkció egy lábon,
 az ADC busz lábai).
 
+**Szoftveres negálás (aktív szint):** minden ki- és bemenetnél külön választható, hogy a „magas” vagy az
+„alacsony” szint jelenti-e az aktív állapotot:
+- kimenet (SSR): „Magas = aktív (normál)” → BE állapotban 3,3 V a lábon; „Alacsony = aktív (negált)” → BE
+  állapotban 0 V (pl. alacsony szintre aktív relémodulhoz);
+- bemenet (áramláskapcsoló, nyomógomb): „Alacsony = aktív (negált)” → a 0 V (GND) jelenti az áramlást /
+  a lenyomott gombot (ez az alapbeállítás); „Magas = aktív” → a 3,3 V.
+
+Az „Élő állapot” oszlop a logikai állapotot és a láb tényleges szintjét is mutatja, így bekötés után azonnal
+ellenőrizhető a polaritás. A mentés azonnal érvényes, a láb elengedése nélkül (járó szivattyúnál sincs
+kiesés), és egy nyomógomb polaritásának átállítása nem számít gombnyomásnak.
+
 **Bemenetek:** a gombok és az áramláskapcsolók a GPIO láb és a GND közé kötendők; a 10 kΩ-os felhúzó ellenállás
 3,3 V-ra menjen (a belső felhúzó is bekapcsolható). **Soha ne köss 5 V-ot GPIO lábra!**
 

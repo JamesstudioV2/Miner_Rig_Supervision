@@ -451,8 +451,8 @@ export class SettingsView {
         <td>${out ? '<span class="pill">kimenet</span>' : '<span class="pill">bemenet</span>'}</td>
         <td><select class="inp sm" data-path="hardware.io.${name}.gpio" data-type="int" data-gpio="${name}">${gpioOptions(it.gpio)}</select></td>
         <td><select class="inp sm" data-path="hardware.io.${name}.active" data-type="text">
-          <option value="high" ${it.active === 'high' ? 'selected' : ''}>Magas (1 = aktív)</option>
-          <option value="low" ${it.active === 'low' ? 'selected' : ''}>Alacsony (0 = aktív)</option></select></td>
+          <option value="high" ${it.active === 'high' ? 'selected' : ''}>Magas = aktív (normál)</option>
+          <option value="low" ${it.active === 'low' ? 'selected' : ''}>Alacsony = aktív (negált)</option></select></td>
         <td>${out ? '—' : `<select class="inp sm" data-path="hardware.io.${name}.pull" data-type="text">
           <option value="up" ${it.pull === 'up' ? 'selected' : ''}>Felhúzó (pull-up)</option>
           <option value="down" ${it.pull === 'down' ? 'selected' : ''}>Lehúzó (pull-down)</option>
@@ -493,7 +493,12 @@ export class SettingsView {
         <div class="note warn"><b>Figyelem:</b> mentés után a program azonnal az új lábakat használja. Csak akkor módosítsd, ha a vezetékezés is ennek megfelelő –
           egy nyomógombra vagy kapcsolóra kötött lábat kimenetként meghajtani károsíthatja a Raspberry Pi-t!
           Az SSR-ek 5 V-os vezérlésénél a Pi 3,3 V-os kimenete nem mindig elég: „alacsony szintre aktív” relémodulnál tranzisztoros illesztő javasolt.</div>
-        <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Funkció</th><th>Irány</th><th>GPIO port</th><th>Aktív szint</th><th>Belső ellenállás</th><th>Élő állapot</th></tr></thead>
+        <div class="note"><b>Aktív szint = szoftveres negálás.</b> Kimenetnél azt adja meg, milyen szintet kap a láb BE (szivattyú jár) állapotban:
+          „Magas” → 3,3 V, „Alacsony (negált)” → 0 V. Bemenetnél azt, hogy milyen szint számít aktívnak (gomb lenyomva / víz áramlik):
+          „Alacsony (negált)” → a 0 V (GND) jelent aktív állapotot. Az „Élő állapot” oszlop mutatja a logikai állapotot és a láb tényleges
+          feszültségszintjét is, így bekötés után azonnal ellenőrizhető. A polaritás mentéskor azonnal, a láb elengedése nélkül vált
+          (járó szivattyúnál sincs kiesés); egy nyomógomb átállítása nem számít gombnyomásnak.</div>
+        <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Funkció</th><th>Irány</th><th>GPIO port</th><th>Aktív szint (negálás)</th><th>Belső ellenállás</th><th>Élő állapot</th></tr></thead>
           <tbody>${ioRows}</tbody></table></div>
         <div class="subcard-title" style="margin-top:16px">40 tűs csatlakozó (felülnézet, 1-es tű bal felső)</div>
         <div class="header-wrap"><div class="pinhdr" id="pinhdr"></div></div>

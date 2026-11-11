@@ -26,6 +26,10 @@ EMA_ALPHA = 0.5
 ADC_RETRY_S = 30.0
 
 
+def _polarity_text(active: str) -> str:
+    return "magas = aktív (normál)" if active == "high" else "alacsony = aktív (negált)"
+
+
 class Debouncer:
     def __init__(self, initial: bool, delay_s: float):
         self.stable = initial
@@ -148,6 +152,40 @@ class IOManager:
         self._debouncers[name] = Debouncer(logical, DEBOUNCE_S[name])
         self._inputs[name] = logical
 
+    def _invert_output(self, name, item):
+        """New active level on the same output pin: rewrite the level, keep the logical state."""
+        pin, active_high = int(item["gpio"]), item["active"] == "high"
+        self._out_pins[name] = (pin, active_high)
+        on = self._outputs[name]
+        try:
+            self.gpio.write(pin, on == active_high)
+            self._out_written[name] = on
+            self.pin_errors.pop(name, None)
+        except Exception as exc:  # noqa: BLE001 - set_outputs() retries the pin setup
+            self._out_written.pop(name, None)
+            self.pin_errors[name] = str(exc)
+            log.error("%s (GPIO%d) írása sikertelen: %s", IO_LABELS[name], pin, exc)
+
+    def _invert_input(self, name, item):
+        """New active level on the same input pin.
+
+        The debouncer restarts from the new logical state WITHOUT an edge: flipping the
+        polarity of a push button must never be taken as a START/STOP press.
+        """
+        pin, active_low = int(item["gpio"]), item["active"] == "low"
+        self._in_pins[name] = (pin, active_low)
+        level = self._raw_levels.get(name)
+        if name not in self.pin_errors:
+            try:
+                level = self.gpio.read(pin)
+                self._raw_levels[name] = level
+            except Exception as exc:  # noqa: BLE001 - reported by poll_inputs() as well
+                log.error("%s (GPIO%d) olvasása sikertelen: %s", IO_LABELS[name], pin, exc)
+                level = None
+        logical = False if level is None else ((not level) if active_low else bool(level))
+        self._debouncers[name] = Debouncer(logical, DEBOUNCE_S[name])
+        self._inputs[name] = logical
+
     def _release(self, name, pin, inactive_level=None):
         try:
             if inactive_level is not None:
@@ -173,10 +211,24 @@ class IOManager:
             return
         with self._lock:
             old_io, new_io = old["hardware"]["io"], new["hardware"]["io"]
-            changed_out = [n for n in IO_OUTPUTS if (old_io[n]["gpio"], old_io[n]["active"]) !=
-                           (new_io[n]["gpio"], new_io[n]["active"])]
-            changed_in = [n for n in IO_INPUTS if (old_io[n]["gpio"], old_io[n]["active"], old_io[n]["pull"]) !=
-                          (new_io[n]["gpio"], new_io[n]["active"], new_io[n]["pull"])]
+            # pin (or pull resistor) changed -> the pin has to be released and set up again
+            changed_out = [n for n in IO_OUTPUTS if old_io[n]["gpio"] != new_io[n]["gpio"]]
+            changed_in = [n for n in IO_INPUTS if (old_io[n]["gpio"], old_io[n]["pull"]) !=
+                          (new_io[n]["gpio"], new_io[n]["pull"])]
+            # only the active level changed (software inversion) -> handled in place, without
+            # releasing the pin, so a running pump does not even glitch
+            inverted_out = [n for n in IO_OUTPUTS if n not in changed_out
+                            and old_io[n]["active"] != new_io[n]["active"]]
+            inverted_in = [n for n in IO_INPUTS if n not in changed_in
+                           and old_io[n]["active"] != new_io[n]["active"]]
+            for n in inverted_out:
+                self._invert_output(n, new_io[n])
+            for n in inverted_in:
+                self._invert_input(n, new_io[n])
+            if inverted_out or inverted_in:
+                self.events.add("info", "Aktív szint (negálás) módosítva: " + ", ".join(
+                    "%s → %s" % (IO_LABELS[n], _polarity_text(new_io[n]["active"]))
+                    for n in inverted_out + inverted_in), source="beállítások")
             if changed_out or changed_in:
                 # 1) release the old pins (validation guarantees that an unchanged
                 #    function never uses a pin that is released here)
@@ -193,8 +245,8 @@ class IOManager:
                 for n in changed_in:
                     self._setup_input(n, new_io[n])
                 self.events.add("info", "GPIO kiosztás módosítva: " + ", ".join(
-                    "%s → GPIO%d" % (IO_LABELS[n], new_io[n]["gpio"]) for n in changed_out + changed_in),
-                    source="beállítások")
+                    "%s → GPIO%d, %s" % (IO_LABELS[n], new_io[n]["gpio"], _polarity_text(new_io[n]["active"]))
+                    for n in changed_out + changed_in), source="beállítások")
             if self._adc_key(new) != self._adc_cfg_key:
                 self._init_adc(new)
                 self.events.add("info", "ADC beállítások módosítva (%s)" % self.adc.name, source="beállítások")

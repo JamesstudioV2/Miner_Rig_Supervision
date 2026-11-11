@@ -193,6 +193,13 @@ class ControllerTest(unittest.TestCase):
         self.c.tick()
         self.assertEqual(self.c.state, CT.STOPPING)
 
+    def test_button_inversion_does_not_start(self):
+        """Flipping a button's polarity changes its logical level without an edge -> no start."""
+        self.c.restore()
+        self.io.inputs["btn_start"] = True  # level flipped by the inversion, but no edge reported
+        self.run_for(2)
+        self.assertEqual(self.c.state, CT.STOPPED)
+
     def test_disabled_button_ignored(self):
         self.store.update({"hardware": {"io": {"btn_start": {"enabled": False}}}})
         self.c.restore()

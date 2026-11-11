@@ -51,6 +51,39 @@ class IOManagerTest(unittest.TestCase):
         self.assertNotIn(17, self.gpio.pins)      # old pin released (after being driven inactive)
         self.assertTrue(self.gpio.output_level(5))  # new pin keeps the pump running
 
+    def test_output_inversion_is_glitch_free(self):
+        calls = []
+        orig_release, orig_write = self.gpio.release, self.gpio.write
+        self.gpio.release = lambda pin: (calls.append(("release", pin)), orig_release(pin))
+        self.gpio.write = lambda pin, level: (calls.append(("write", pin, level)), orig_write(pin, level))
+        self.assertTrue(self.gpio.output_level(17))           # P1 BE, magas = aktív -> 3,3 V
+        self.store.update({"hardware": {"io": {"pump1": {"active": "low"}}}})
+        self.assertEqual(calls, [("write", 17, False)])        # nincs elengedés, csak átírás
+        self.assertFalse(self.gpio.output_level(17))          # P1 továbbra is BE, de negálva -> 0 V
+        self.assertTrue(self.io.outputs()["pump1"])           # a logikai állapot nem változott
+        self.io.set_outputs({"pump1": False, "pump2": False}, 10.0)
+        self.assertTrue(self.gpio.output_level(17))           # KI + negált -> 3,3 V
+        pins = self.io.pin_states()
+        self.assertFalse(pins["pump1"]["active"])
+        self.assertTrue(pins["pump1"]["level"])
+
+    def test_input_inversion_no_spurious_press(self):
+        states, _ = self.io.poll_inputs(0.0)
+        self.assertFalse(states["btn_start"])                 # felhúzva (3,3 V), alacsony = aktív -> nincs lenyomva
+        self.store.update({"hardware": {"io": {"btn_start": {"active": "high"}}}})
+        states, edges = self.io.poll_inputs(0.1)
+        self.assertTrue(states["btn_start"])                  # ugyanaz a 3,3 V most aktívnak számít...
+        self.assertEqual(edges, [])                           # ...de ez NEM gombnyomás (nincs él)
+        self.store.update({"hardware": {"io": {"flow1": {"active": "high"}}}})
+        states, edges = self.io.poll_inputs(1.0)
+        self.assertTrue(states["flow1"])                      # negálás nélkül: 3,3 V = áramlik (azonnal, él nélkül)
+        self.assertEqual(edges, [])
+        self.gpio.drive_external(22, False)                   # 0 V -> nem áramlik
+        self.io.poll_inputs(1.1)
+        states, edges = self.io.poll_inputs(1.5)
+        self.assertFalse(states["flow1"])
+        self.assertIn(("flow1", False), edges)
+
     def test_read_error_is_fail_safe(self):
         self.gpio.drive_external(22, False)
         self.io.poll_inputs(0.0)
