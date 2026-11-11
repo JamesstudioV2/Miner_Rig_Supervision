@@ -400,8 +400,8 @@ def make_handler(app):
                 app.config.update({"sensors": {sid: {"offset": offset}}})
             except ConfigError as exc:
                 return self._json({"ok": False, "error": "; ".join(exc.errors)}, 400)
-            app.events.add("info", "%s kalibrálva: referencia %.2f °C, új eltolás %+.2f °C" % (
-                sid.upper(), reference, offset), source="web")
+            app.events.add("info", ("%s kalibrálva: referencia %.2f °C, új eltolás %+.2f °C" % (
+                sid.upper(), reference, offset)).replace(".", ","), source="web")
             self._json({"ok": True, "offset": offset})
 
         def h_hw(self, query):

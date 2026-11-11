@@ -43,6 +43,15 @@ ACTIVE_STATES = (STARTING, RUNNING)
 PUMP_LABELS = {"pump1": "P1 (belső kör)", "pump2": "P2 (külső kör)"}
 
 TICK_S = 0.05
+
+
+def _c(value) -> str:
+    """Hungarian decimal format for user facing messages (21,5)."""
+    return ("%.1f" % value).replace(".", ",")
+
+
+def _g(value) -> str:
+    return ("%g" % value).replace(".", ",")
 STUCK_BUTTON_S = 30.0
 FORCE_STOP_EVERY_S = 5.0
 
@@ -103,6 +112,12 @@ class Controller:
 
     # -------------------------------------------------------------- lifecycle
     def start(self) -> None:
+        self.restore()
+        self._thread = threading.Thread(target=self._loop, name="controller", daemon=True)
+        self._thread.start()
+
+    def restore(self) -> None:
+        """Restore the state saved before the last shutdown / power loss."""
         cfg = self.cfg_store.data
         prev = self._restored.get("state")
         with self._lock:
@@ -123,8 +138,6 @@ class Controller:
                 self.state = STOPPED
                 self.miners.command_all("stop", reason="program indulás leállított állapotban", source="rendszer")
             self._save_state()
-        self._thread = threading.Thread(target=self._loop, name="controller", daemon=True)
-        self._thread.start()
 
     def stop(self) -> None:
         self._stop_evt.set()
@@ -215,8 +228,8 @@ class Controller:
         self._miners_started = False
         self._start_source = source
         delay = self.cfg_store.data["safety"]["miner_start_delay_s"]
-        self._set_state(STARTING, "Rendszer indítása (%s): szivattyúk bekapcsolva, a minerek %g mp múlva indulnak"
-                        % (source, delay), source=source)
+        self._set_state(STARTING, "Rendszer indítása (%s): szivattyúk bekapcsolva, a minerek %s mp múlva indulnak"
+                        % (source, _g(delay)), source=source)
 
     def _run_sequences(self, mono: float, sf: dict) -> None:
         if self.state == STARTING:
@@ -256,16 +269,16 @@ class Controller:
             if not self._flow_seen[loop]:
                 if mono - self._pumps_on_mono >= sf["flow_start_timeout_s"]:
                     self._emergency(E.flow_code(loop, True),
-                                    "A P%d szivattyú bekapcsolása után %g mp-ig sem jelzett áramlást az F%d "
-                                    "áramláskapcsoló (%s kör)" % (loop, sf["flow_start_timeout_s"], loop, circuit))
+                                    "A P%d szivattyú bekapcsolása után %s mp-ig sem jelzett áramlást az F%d "
+                                    "áramláskapcsoló (%s kör)" % (loop, _g(sf["flow_start_timeout_s"]), loop, circuit))
                     return
             else:
                 if self._flow_lost_since[loop] is None:
                     self._flow_lost_since[loop] = mono
                 elif mono - self._flow_lost_since[loop] >= sf["flow_loss_delay_s"]:
                     self._emergency(E.flow_code(loop, False),
-                                    "Az F%d áramláskapcsoló %g mp óta nem jelez áramlást (%s kör)"
-                                    % (loop, sf["flow_loss_delay_s"], circuit))
+                                    "Az F%d áramláskapcsoló %s mp óta nem jelez áramlást (%s kör)"
+                                    % (loop, _g(sf["flow_loss_delay_s"]), circuit))
                     return
 
     @staticmethod
@@ -304,7 +317,8 @@ class Controller:
                 if self._limit_since[sid] is None:
                     self._limit_since[sid] = mono
                 if mono - self._limit_since[sid] >= sf["limit_trip_delay_s"]:
-                    msg = "%s túl %s: %.1f °C (megengedett: %g … %g °C)" % (label, violation, value, s["min"], s["max"])
+                    msg = "%s túl %s: %s °C (megengedett: %s … %s °C)" % (label, violation, _c(value), _g(s["min"]),
+                                                                          _g(s["max"]))
                     if self.state in ACTIVE_STATES:
                         self._emergency(E.limit_code(sid, True), msg)
                     self._warn(key, E.limit_code(sid, False), msg + " – indítás tiltva", "error")
@@ -332,20 +346,20 @@ class Controller:
         if not self.assist["active"]:
             if hottest and hottest[0] >= threshold:
                 self.assist = {"active": True, "since": time.time(), "since_mono": mono,
-                               "reason": "%s: %.1f °C" % (hottest[1], hottest[0])}
-                self.events.add("warning", "Utóhűtés: %s hőmérséklete %.1f °C (≥ %g °C) leállított állapotban – "
-                                           "szivattyúk bekapcsolva" % (hottest[1], hottest[0], threshold),
+                               "reason": "%s: %s °C" % (hottest[1], _c(hottest[0]))}
+                self.events.add("warning", "Utóhűtés: %s hőmérséklete %s °C (≥ %s °C) leállított állapotban – "
+                                           "szivattyúk bekapcsolva" % (hottest[1], _c(hottest[0]), _g(threshold)),
                                 code="I501", source="védelem")
                 self._last_force_stop = mono
                 self.miners.force_stop_hashing("túlmelegedés leállított állapotban")
                 self.signal.bump()
             return
         if hottest:
-            self.assist["reason"] = "%s: %.1f °C" % (hottest[1], hottest[0])
+            self.assist["reason"] = "%s: %s °C" % (hottest[1], _c(hottest[0]))
         cool = hottest is None or hottest[0] < threshold - sf["overheat_hysteresis_c"]
         if cool and mono - self.assist["since_mono"] >= sf["overheat_min_run_s"]:
             self._assist_off("Utóhűtés vége (%s) – szivattyúk kikapcsolva" % (
-                "legmagasabb: %.1f °C" % hottest[0] if hottest else "nincs hőmérséklet adat"))
+                "legmagasabb: %s °C" % _c(hottest[0]) if hottest else "nincs hőmérséklet adat"))
         elif hottest and hottest[0] >= threshold and mono - self._last_force_stop >= FORCE_STOP_EVERY_S:
             self._last_force_stop = mono
             self.miners.force_stop_hashing("túlmelegedés leállított állapotban")
@@ -450,8 +464,8 @@ class Controller:
             r = temps.get(sid) or {}
             violation = self._limit_violation(s, r.get("value"))
             if violation:
-                reasons.append("%s túl %s (%.1f °C, megengedett: %g … %g °C)" % (
-                    sid.upper(), violation, r["value"], s["min"], s["max"]))
+                reasons.append("%s túl %s (%s °C, megengedett: %s … %s °C)" % (
+                    sid.upper(), violation, _c(r["value"]), _g(s["min"]), _g(s["max"])))
             if s["stop_on_fault"] and r.get("fault"):
                 reasons.append("%s szenzorhiba (%s)" % (sid.upper(), r.get("fault_text") or r.get("fault")))
         return "; ".join(reasons) or None
@@ -474,8 +488,8 @@ class Controller:
         if self.state in ACTIVE_STATES:
             n = self.miners.command_all("stop", reason="rendszer leállítás", source=source)
             delay = self.cfg_store.data["safety"]["post_stop_pump_s"]
-            self._set_state(STOPPING, "Rendszer leállítása (%s): leállítási parancs %d minernek, a szivattyúk %g mp "
-                                      "utókeringetés után állnak le" % (source, n, delay), source=source)
+            self._set_state(STOPPING, "Rendszer leállítása (%s): leállítási parancs %d minernek, a szivattyúk %s mp "
+                                      "utókeringetés után állnak le" % (source, n, _g(delay)), source=source)
             return True, "Leállítás folyamatban"
         if self.state == STOPPING:
             return True, "A leállítás már folyamatban van"

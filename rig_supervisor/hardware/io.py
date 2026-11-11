@@ -215,7 +215,13 @@ class IOManager:
                 try:
                     level = self.gpio.read(pin)
                 except Exception as exc:  # noqa: BLE001
+                    # fail-safe: an unreadable flow switch means "no flow", a button "not pressed"
                     self.pin_errors[name] = str(exc)
+                    log.error("%s olvasási hiba: %s", IO_LABELS[name], exc)
+                    if self._inputs[name]:
+                        self._inputs[name] = False
+                        self._debouncers[name] = Debouncer(False, DEBOUNCE_S[name])
+                        edges.append((name, False))
                     continue
                 self._raw_levels[name] = level
                 logical = (not level) if active_low else bool(level)

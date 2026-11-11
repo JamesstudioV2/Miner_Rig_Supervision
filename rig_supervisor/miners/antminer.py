@@ -63,9 +63,13 @@ class AntminerStock(MinerDriver):
         return http_json(self._url(cgi), username=self.username, password=self.password,
                          timeout=timeout or self.timeout)
 
-    def web_post(self, cgi: str, payload: dict, timeout=None):
-        return http_json(self._url(cgi), method="POST", data=payload, username=self.username,
-                         password=self.password, timeout=timeout or max(self.timeout, 10.0), allow_empty=True)
+    def web_post(self, cgi: str, payload: dict, timeout=None) -> None:
+        # the reply body differs between firmware versions (JSON / plain text) - the result is
+        # verified by reading the configuration back, so only the HTTP status matters here
+        status, _body = http_request(self._url(cgi), method="POST", data=payload, username=self.username,
+                                     password=self.password, timeout=timeout or max(self.timeout, 10.0))
+        if status != 200:
+            raise MinerError("a beállítás mentése sikertelen (HTTP %d)" % status)
 
     def poll(self) -> MinerData:
         md = MinerData()
