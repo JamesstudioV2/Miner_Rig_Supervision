@@ -182,6 +182,11 @@ export class Dashboard {
         items.push({ level: 'warning', code: 'W402', message: `${m.name}: ${m.data.errors.join('; ')}` });
       }
     }
+    const fake = (st.miners || []).filter((m) => m.enabled && m.type === 'simulated');
+    if (!st.sim && fake.length) {
+      items.push({ level: 'warning', code: 'W405', message: `Szimulált (nem valódi) miner van a listában: ${fake.map((m) => m.name).join(', ')} – ` +
+        'valódi hardver módban töröld a Beállítások › Minerek oldalon, és vedd fel a valódi minereket.' });
+    }
     const order = { error: 0, warning: 1, info: 2 };
     items.sort((a, b) => order[a.level] - order[b.level]);
     $('#warn-list').innerHTML = items.length ? items.map((w) => `<div class="warn ${w.level}"><span class="code">${esc(w.code)}</span><span>${esc(w.message)}</span></div>`).join('')

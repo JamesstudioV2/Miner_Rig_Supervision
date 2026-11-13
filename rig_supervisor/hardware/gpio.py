@@ -12,24 +12,42 @@ new process takes them over).
 from __future__ import annotations
 
 import logging
+import os
+import re
+import sys
 import threading
 
 log = logging.getLogger(__name__)
 
+INSTALL_HINT = "telepítés: sudo apt install python3-rpi.gpio python3-lgpio"
+_SOC_RE = re.compile(r"^Hardware\s*:\s*BCM2[78]\d\d", re.MULTILINE)
 
-def is_raspberry_pi() -> bool:
-    try:
-        with open("/proc/device-tree/model", "rb") as f:
-            if b"Raspberry Pi" in f.read():
-                return True
-    except OSError:
-        pass
+
+def pi_model() -> str:
+    """Model string of the board ("Raspberry Pi 2 Model B Rev 1.1"), empty when not a Pi."""
+    for path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
+        try:
+            with open(path, "rb") as f:
+                text = f.read().decode("utf-8", "replace").strip("\x00 \n")
+            if "Raspberry Pi" in text:
+                return text
+        except OSError:
+            pass
     try:
         with open("/proc/cpuinfo", "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
-        return "Raspberry Pi" in text
     except OSError:
-        return False
+        return ""
+    m = re.search(r"^Model\s*:\s*(.*Raspberry Pi.*)$", text, re.MULTILINE)
+    if m:
+        return m.group(1).strip()
+    if _SOC_RE.search(text):  # old kernels without device tree: only the SoC name is listed
+        return "Raspberry Pi (%s)" % _SOC_RE.search(text).group(0).split(":")[1].strip()
+    return ""
+
+
+def is_raspberry_pi() -> bool:
+    return bool(pi_model())
 
 
 class GPIOBackend:
@@ -63,6 +81,10 @@ class RPiGPIOBackend(GPIOBackend):
         self.G = GPIO
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
+        # access probe: fails right here when /dev/gpiomem is not accessible (missing "gpio"
+        # group membership...) so that the next library can be tried instead
+        GPIO.gpio_function(4)
+        self.version = str(getattr(GPIO, "VERSION", "?"))
 
     def setup_output(self, pin, level):
         self.G.setup(pin, self.G.OUT, initial=self.G.HIGH if level else self.G.LOW)
@@ -89,6 +111,13 @@ class LGPIOBackend(GPIOBackend):
 
         self.lg = lgpio
         self.handle = lgpio.gpiochip_open(chip)
+        self.version = str(getattr(lgpio, "LGPIO_PY_VERSION", "?"))
+
+    def close(self):
+        try:
+            self.lg.gpiochip_close(self.handle)
+        except Exception:  # noqa: BLE001
+            pass
 
     def setup_output(self, pin, level):
         try:
@@ -199,6 +228,34 @@ def create_gpio_backend(kind: str):
             return backend, errors
         except Exception as exc:  # noqa: BLE001 - try the next one
             errors.append("%s: %s" % (cls.name, exc))
-    reason = "; ".join(errors) or "ismeretlen hiba"
+    errors.append(INSTALL_HINT)
+    reason = "; ".join(errors)
     log.error("Egyik GPIO könyvtár sem használható: %s", reason)
     return NullGPIOBackend(reason), errors
+
+
+def diagnostics() -> dict:
+    """Environment facts that matter for GPIO access (shown on the calibration page)."""
+    devices = {}
+    for dev in ("/dev/gpiomem", "/dev/gpiochip0", "/dev/spidev0.0", "/dev/i2c-1"):
+        if not os.path.exists(dev):
+            devices[dev] = "nincs"
+        elif os.access(dev, os.R_OK | os.W_OK):
+            devices[dev] = "elérhető"
+        else:
+            devices[dev] = "nincs jogosultság"
+    libs = {}
+    for mod in ("RPi.GPIO", "lgpio", "spidev", "smbus2", "smbus"):
+        libs[mod] = "betöltve" if mod in sys.modules else "–"
+    try:
+        import grp
+        groups = sorted({grp.getgrgid(g).gr_name for g in os.getgroups()})
+    except Exception:  # noqa: BLE001
+        groups = []
+    try:
+        import pwd
+        user = pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:  # noqa: BLE001
+        user = str(os.geteuid()) if hasattr(os, "geteuid") else ""
+    return {"model": pi_model(), "user": user, "groups": groups, "devices": devices, "libs": libs,
+            "python": sys.version.split()[0]}

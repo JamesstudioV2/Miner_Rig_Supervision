@@ -20,6 +20,7 @@ from .. import __version__
 from ..config import (ADC_TYPES, GPIO_TO_PIN, IO_INPUTS, IO_LABELS, IO_OUTPUTS, SENSOR_IDS, ConfigError,
                       bus_pins)
 from ..errors import CATALOG
+from ..hardware.gpio import diagnostics as gpio_diagnostics
 from ..miners.registry import create_driver, driver_types
 from ..miners.scanner import default_subnet, scan
 from .auth import hash_password, verify_password
@@ -316,7 +317,7 @@ def make_handler(app):
 
         def h_config_get(self, query):
             self._json({"ok": True, "config": masked_config(app.config.data), "meta": config_meta(),
-                        "sim": app.simulated, "version": __version__,
+                        "sim": app.simulated, "mode": app.mode_info(), "version": __version__,
                         "bus_pins": {str(k): v for k, v in bus_pins(app.config.data["hardware"]["adc"]).items()}})
 
         def h_config_post(self, query):
@@ -344,6 +345,12 @@ def make_handler(app):
                             m["password"] = old["password"]
                         else:
                             m.pop("password", None)
+            hardware = patch.get("hardware")
+            new_backend = hardware.get("backend") if isinstance(hardware, dict) else None
+            if new_backend is not None and new_backend != app.config.data["hardware"]["backend"] \
+                    and app.controller.state not in ("stopped", "emergency"):
+                raise HttpError(409, "A hardver mód csak leállított rendszernél váltható át – előbb állítsd le a "
+                                     "rendszert (LEÁLLÍTÁS), és várd meg, amíg a szivattyúk leállnak")
             try:
                 app.config.update(patch)
             except ConfigError as exc:
@@ -351,7 +358,8 @@ def make_handler(app):
             app.events.add("info", "Beállítások módosítva (%s)" % ", ".join(sorted(patch.keys())),
                            source="web")
             app.signal.bump()
-            self._json({"ok": True, "config": masked_config(app.config.data),
+            self._json({"ok": True, "config": masked_config(app.config.data), "sim": app.simulated,
+                        "mode": app.mode_info(),
                         "bus_pins": {str(k): v for k, v in bus_pins(app.config.data["hardware"]["adc"]).items()}})
 
         def h_password(self, query):
@@ -406,7 +414,7 @@ def make_handler(app):
 
         def h_hw(self, query):
             self._json({"ok": True, "pins": app.io.pin_states(), "sensors": app.io.sensor_snapshot(),
-                        "hardware": app.io.status(),
+                        "hardware": app.io.status(), "mode": app.mode_info(), "diagnostics": gpio_diagnostics(),
                         "bus_pins": {str(k): v for k, v in bus_pins(app.config.data["hardware"]["adc"]).items()}})
 
         def h_miner_test(self, query):

@@ -1,11 +1,11 @@
 // Fő modul: élő adatkapcsolat (Server-Sent Events, tartalék: lekérdezés), fülek kezelése, fejléc.
-import { api, $, $$ } from './util.js';
+import { api, $, $$, toast, confirmDialog } from './util.js';
 import { Dashboard } from './dashboard.js';
 import { HistoryView } from './history.js';
 import { EventsView } from './events.js';
 import { SettingsView } from './settings.js';
 
-const store = { system: null, miners: [], summary: null, events: [], sim: false, version: '', lastMsg: 0 };
+const store = { system: null, miners: [], summary: null, events: [], sim: false, mode: {}, version: '', lastMsg: 0 };
 const views = {};
 let current = null;
 let renderQueued = false;
@@ -23,6 +23,7 @@ function applyMessage(d) {
   if (d.summary) store.summary = d.summary;
   if (d.events) store.events = d.events;
   if (d.sim !== undefined) store.sim = d.sim;
+  if (d.mode) store.mode = d.mode;
   if (d.version) store.version = d.version;
   store.lastMsg = Date.now();
   setConn('live');
@@ -42,7 +43,17 @@ function render() {
     $('#site-name').textContent = s.site_name;
     document.title = s.system.label + ' – ' + s.site_name;
   }
-  $('#sim-banner').hidden = !store.sim;
+  const banner = $('#sim-banner');
+  banner.hidden = !store.sim;
+  if (store.sim) {
+    // Raspberry Pi-n a szimuláció azt jelenti, hogy a valódi lábak NEM változnak – ezt nem lehet eléggé hangsúlyozni
+    const onPi = !!store.mode.on_pi;
+    banner.classList.toggle('banner-warn', onPi);
+    $('#sim-banner-text').textContent = onPi
+      ? 'SZIMULÁCIÓS MÓD – a program most NEM vezérli a Raspberry Pi GPIO lábait (szivattyúk, szenzorok), minden adat szimulált!'
+      : 'SZIMULÁCIÓS MÓD – ez a gép nem Raspberry Pi, minden adat szimulált.';
+    $('#sim-switch').hidden = !onPi;
+  }
   // olvasatlan hiba/figyelmeztetés események száma
   let seen = 0;
   try { seen = parseInt(localStorage.getItem('rig.lastSeenEvent') || '0', 10); } catch (e) { /* ignore */ }
@@ -116,7 +127,17 @@ function route() {
   window.scrollTo({ top: 0 });
 }
 
+async function switchToRealHardware() {
+  const ok = await confirmDialog('Váltás valódi hardverre',
+    'A program ezután a Raspberry Pi valódi GPIO lábait vezérli (szivattyú SSR-ek), és a valódi szenzorokat olvassa. ' +
+    'A váltás azonnal érvényes, újraindítás nem kell. Folytatod?', 'Váltás');
+  if (!ok) return;
+  const done = await views.settings.applyMode('rpi');
+  if (done && current !== 'settings') toast('Ellenőrizd a lábkiosztást: Beállítások › Kalibráció & GPIO', 'ok', 7000);
+}
+
 async function init() {
+  $('#sim-switch').addEventListener('click', switchToRealHardware);
   views.dashboard = new Dashboard(store);
   views.charts = new HistoryView();
   views.events = new EventsView();

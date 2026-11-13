@@ -28,13 +28,31 @@ if [ "$PYV" -lt 307 ]; then
   echo "Python 3.7 vagy újabb szükséges (talált: $(python3 --version))" >&2
   exit 1
 fi
-for pkg in i2c-tools python3-rpi.gpio python3-lgpio python3-smbus python3-spidev; do
-  if apt-get install -y -qq "$pkg" >/dev/null 2>&1; then
-    echo "    + $pkg"
-  else
-    echo "    - $pkg nem elérhető ezen a rendszeren (kihagyva)"
+# csak azt telepítjük, ami hiányzik (a python3-rpi-lgpio és a python3-rpi.gpio ugyanazt a modult adja)
+need_pkg() {  # need_pkg <python modul> <csomag>...
+  local mod="$1"; shift
+  if python3 -c "import $mod" >/dev/null 2>&1; then
+    echo "    = $mod már telepítve"
+    return 0
   fi
-done
+  for pkg in "$@"; do
+    if apt-get install -y -qq "$pkg" >/dev/null 2>&1 && python3 -c "import $mod" >/dev/null 2>&1; then
+      echo "    + $pkg"
+      return 0
+    fi
+  done
+  echo "    - $mod nem telepíthető ($*)"
+  return 1
+}
+apt-get install -y -qq i2c-tools >/dev/null 2>&1 || true
+GPIO_LIBS=0
+need_pkg RPi.GPIO python3-rpi.gpio python3-rpi-lgpio && GPIO_LIBS=1
+need_pkg lgpio python3-lgpio && GPIO_LIBS=1
+need_pkg spidev python3-spidev || true
+need_pkg smbus python3-smbus || need_pkg smbus2 python3-smbus2 || true
+if [ "$GPIO_LIBS" -eq 0 ]; then
+  echo "FIGYELEM: egyik GPIO könyvtár (RPi.GPIO / lgpio) sem telepíthető - a szivattyúk nem lesznek vezérelhetők!" >&2
+fi
 
 if command -v raspi-config >/dev/null 2>&1; then
   echo "==> I²C és SPI engedélyezése…"
@@ -89,6 +107,11 @@ else
   echo "A szolgáltatás nem indult el. Napló: journalctl -u $SERVICE -n 50" >&2
   exit 1
 fi
+echo
+echo "==> Hardver ellenőrzés a szolgáltatás felhasználójával (rigsup):"
+(cd "$APP_DIR" && runuser -u rigsup -- env LG_WD="$DATA_DIR" /usr/bin/python3 -m rig_supervisor --diagnose --data "$DATA_DIR") \
+  || echo "FIGYELEM: a GPIO nem használható - lásd a fenti hibákat és a README 'Hibaelhárítás' részét." >&2
+echo
 echo "Napló megtekintése:      journalctl -u $SERVICE -f"
 echo "Leállítás / indítás:     sudo systemctl stop|start $SERVICE"
 if [ -f /var/run/reboot-required ] || ! ls /dev/i2c-1 >/dev/null 2>&1; then

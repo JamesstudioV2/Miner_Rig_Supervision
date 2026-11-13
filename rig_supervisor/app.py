@@ -12,7 +12,7 @@ from .config import ConfigStore, new_miner_id
 from .controller import Controller
 from .datalog import DataLogger
 from .events import EventStore
-from .hardware.gpio import is_raspberry_pi
+from .hardware.gpio import pi_model
 from .hardware.io import IOManager
 from .hardware.sim import SimWorld
 from .miners.manager import MinerManager
@@ -33,10 +33,12 @@ class App:
         self.data_dir = data_dir
         self.signal = ChangeSignal()
         self.config = ConfigStore(os.path.join(data_dir, "config.json"))
-        backend = self.config.data["hardware"]["backend"]
-        if simulate is None:
-            simulate = backend == "sim" or (backend == "auto" and not is_raspberry_pi())
-        self.simulated = bool(simulate)
+        # ``simulate`` (the --sim / --hardware command line switch) only decides what the
+        # "auto" setting means.  An explicit choice made on the web interface always wins.
+        self._cli_simulate = simulate
+        self.pi_model = pi_model()
+        self._mode_lock = threading.Lock()
+        self.simulated, self.mode_reason = self._resolve_mode(self.config.data)
         if self.simulated and self.config.created and not self.config.data["miners"]["list"]:
             self.config.update({"miners": {"list": _demo_miners()}})
         self.events = EventStore(os.path.join(data_dir, "events.sqlite"))
@@ -53,6 +55,71 @@ class App:
         self.sse_lock = threading.Lock()
         self.sse_clients = 0
         self.events.add_listener(lambda _e: self.signal.bump())
+        # registered last: the IO manager and the miner manager apply their own changes first
+        self.config.add_listener(self._on_config_change)
+
+    # ----------------------------------------------------------- hardware mode
+    def _resolve_mode(self, cfg: dict):
+        """Return ``(simulated, human readable reason)`` for a configuration."""
+        backend = cfg["hardware"]["backend"]
+        if backend == "sim":
+            return True, "beállítás: szimuláció"
+        if backend == "rpi":
+            return False, "beállítás: valódi hardver"
+        if self._cli_simulate is True:
+            return True, "automatikus mód – a program --sim kapcsolóval indult"
+        if self._cli_simulate is False:
+            return False, "automatikus mód – a program --hardware kapcsolóval indult"
+        if self.pi_model:
+            return False, "automatikus mód – %s észlelve" % self.pi_model
+        return True, "automatikus mód – ez a gép nem Raspberry Pi"
+
+    def mode_info(self) -> dict:
+        return {
+            "simulated": self.simulated,
+            "reason": self.mode_reason,
+            "setting": self.config.data["hardware"]["backend"],
+            "on_pi": bool(self.pi_model),
+            "pi_model": self.pi_model,
+        }
+
+    def _on_config_change(self, old: dict, new: dict) -> None:
+        if old["hardware"]["backend"] != new["hardware"]["backend"]:
+            self.apply_hardware_mode()
+
+    def apply_hardware_mode(self) -> bool:
+        """Apply the configured hardware mode immediately (no restart needed)."""
+        with self._mode_lock:
+            want, reason = self._resolve_mode(self.config.data)
+            self.mode_reason = reason
+            if want == self.simulated:
+                self.signal.bump()
+                return False
+            if self.io.gpio is None:  # not started yet
+                self.simulated = want
+                return True
+            old_world = self.sim
+            new_world = SimWorld(self.config) if want else None
+            self.io.switch_backend(want, new_world)
+            self.sim, self.simulated = new_world, want
+            self.miners.set_sim_world(new_world)
+            if old_world is not None:
+                old_world.stop()
+            if new_world is not None:
+                new_world.start()
+            hw = self.io.status()
+            if want:
+                self.events.add("warning", "Hardver mód: SZIMULÁCIÓ (%s) – a valódi GPIO lábak mostantól nem "
+                                           "változnak" % reason, source="beállítások")
+            elif hw["gpio_ok"]:
+                self.events.add("info", "Hardver mód: VALÓDI HARDVER (%s) – GPIO könyvtár: %s" % (
+                    reason, hw["gpio_backend"]), source="beállítások")
+            else:
+                self.events.add("error", "Hardver mód: valódi hardver, de a GPIO nem használható: %s" % "; ".join(
+                    dict.fromkeys(hw["gpio_errors"] + list(hw["pin_errors"].values()))), code="E301",
+                    source="beállítások")
+            self.signal.bump()
+            return True
 
     def start(self, host: str = "0.0.0.0") -> None:
         from .web.server import WebServer
@@ -60,9 +127,11 @@ class App:
         # the web port is bound first: a port conflict must not leave a half started controller behind
         self.web = WebServer(self, host, self.port)
         self.port = self.web.port
-        self.events.add("info", "Program indítása (v%s)%s" % (
-            __version__, " – SZIMULÁCIÓS MÓD (nincs valódi hardver)" if self.simulated else ""), source="rendszer")
         self.io.start(self.controller.initial_outputs())
+        hw = self.io.status()
+        self.events.add("info", "Program indítása (v%s) – hardver mód: %s (%s)" % (
+            __version__, "SZIMULÁCIÓ" if self.simulated else "valódi hardver, GPIO: %s" % hw["gpio_backend"],
+            self.mode_reason), source="rendszer")
         if self.sim is not None:
             self.sim.start()
         self.miners.start()
@@ -97,6 +166,7 @@ class App:
             "server_time": time.time(),
             "version": __version__,
             "sim": self.simulated,
+            "mode": self.mode_info(),
         }
 
     def log_snapshot(self) -> dict:

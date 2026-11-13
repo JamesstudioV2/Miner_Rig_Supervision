@@ -85,6 +85,17 @@ class MinerManager:
         self._poll_pool.shutdown(wait=False)
         self._cmd_pool.shutdown(wait=False)
 
+    def set_sim_world(self, sim_world) -> None:
+        """The hardware mode changed at runtime: rebind the simulated miners to the new world."""
+        with self._lock:
+            self.sim = sim_world
+            for rec in self._records.values():
+                if rec.cfg["type"] == "simulated":
+                    rec.driver = create_driver(rec.cfg, rec.timeout, sim_world)
+                    rec.data, rec.online, rec.fail_count = None, False, 0
+        self.signal.bump()
+        self._wake.set()
+
     def _sync(self, cfg: dict) -> None:
         timeout = float(cfg["miners"]["timeout_s"])
         with self._lock:
@@ -189,7 +200,13 @@ class MinerManager:
         return None
 
     # ------------------------------------------------------------- commands
+    def _blocked_in_sim(self, rec: MinerRecord, action: str) -> bool:
+        """In simulation mode the real pumps do not run - a REAL miner must never be started."""
+        return self.sim is not None and action in ("start", "reboot") and rec.cfg["type"] != "simulated"
+
     def _submit(self, rec: MinerRecord, action: str, reason: str = "", source: str = "") -> None:
+        if self._blocked_in_sim(rec, action):
+            return
         with self._lock:
             rec.next_action = (action, reason, source)
             rec.last_cmd_mono = time.monotonic()
@@ -240,7 +257,13 @@ class MinerManager:
             for r in recs:
                 r.desired = self.system_desired
         sent = 0
+        blocked = [r.name for r in recs if self._blocked_in_sim(r, action)]
+        if blocked:
+            self.events.add("warning", "Szimulációs módban a valódi minerek nem indulnak el (a valódi szivattyúk nem "
+                                       "járnak): %s" % ", ".join(blocked), code="W403", source=source or "miner")
         for r in recs:
+            if self._blocked_in_sim(r, action):
+                continue
             if not r.driver.can_control:
                 if r.cfg["id"] not in self._no_control_warned:
                     self._no_control_warned.add(r.cfg["id"])
@@ -257,6 +280,8 @@ class MinerManager:
             rec = self._records.get(miner_id)
             if rec is None:
                 return False, "Ismeretlen miner"
+            if self._blocked_in_sim(rec, action):
+                return False, "Szimulációs módban valódi miner nem indítható (a valódi szivattyúk nem járnak)"
             if action in ("start", "stop"):
                 if not rec.driver.can_control:
                     return False, "Ez a miner típus nem vezérelhető"

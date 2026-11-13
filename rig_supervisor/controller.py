@@ -403,7 +403,9 @@ class Controller:
     def _status_warnings(self, cfg: dict) -> None:
         hw = self.io.status()
         if not hw["gpio_ok"]:
-            detail = "; ".join(list(hw["pin_errors"].values()) + hw["gpio_errors"]) or "ismeretlen hiba"
+            parts = ["%s – %s" % (label, err) for label, err in hw["pin_errors"].items()
+                     if err != "nincs használható GPIO könyvtár"] + hw["gpio_errors"]
+            detail = "; ".join(dict.fromkeys(parts)) or "ismeretlen hiba"
             self._warn("hw:gpio", "E301", "GPIO hiba – a szivattyúk nem vezérelhetők: %s" % detail, "error")
         else:
             self._clear_warn("hw:gpio")
@@ -411,6 +413,17 @@ class Controller:
             self._warn("hw:adc", "W301", hw["adc_error"], "warning")
         else:
             self._clear_warn("hw:adc")
+        mismatch = hw.get("output_mismatch") or {}
+        for name in ("pump1", "pump2"):
+            key = "mismatch:" + name
+            m = mismatch.get(name)
+            if m:
+                self._warn(key, "W305", "%s (GPIO%d): a program %s szintet ad ki, de a lábon %s mérhető – rövidzár, "
+                                        "túlterhelt kimenet vagy hibás bekötés" % (
+                                            m["label"], m["gpio"], "magas (3,3 V)" if m["expected"] else "alacsony (0 V)",
+                                            "magas" if m["actual"] else "alacsony"), "warning")
+            else:
+                self._clear_warn(key)
         for loop in (1, 2):
             key = "flowdis:%d" % loop
             if not cfg["hardware"]["io"]["flow%d" % loop]["enabled"]:
@@ -422,8 +435,10 @@ class Controller:
         for i, text in enumerate(self.cfg_store.load_warnings):
             self._warn("cfg:%d" % i, "W302", text, "warning")
         if hw["sim"]:
-            self._warn("sim", "I503", "Szimulációs mód – nincs valódi hardver (GPIO/ADC) csatlakoztatva",
-                       "info", log_event=False)
+            self._warn("sim", "I503", "Szimulációs mód – a program NEM vezérli a valódi GPIO lábakat és nem olvassa "
+                                      "a valódi szenzorokat", "info", log_event=False)
+        else:
+            self._clear_warn("sim", log_event=False)
         if self.assist["active"]:
             self._warn("assist", "I501", "Utóhűtés aktív – %s" % self.assist["reason"], "warning", log_event=False)
         else:

@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 
 DEBOUNCE_S = {"flow1": 0.3, "flow2": 0.3, "btn_start": 0.05, "btn_stop": 0.05}
 REASSERT_S = 5.0          # outputs are re-written periodically (glitch recovery)
+NO_GPIO_TEXT = "nincs használható GPIO könyvtár"
+READBACK_S = 1.0          # outputs are read back periodically (does the pin really follow?)
+MISMATCH_AFTER = 3        # consecutive differing read-backs before a mismatch is reported
 SENSOR_PERIOD_S = 1.0
 EMA_ALPHA = 0.5
 ADC_RETRY_S = 30.0
@@ -72,6 +75,9 @@ class IOManager:
         self._raw_levels = {}
         self._inputs = {name: False for name in IO_INPUTS}
         self._last_reassert = 0.0
+        self._last_readback = -1e9
+        self._out_actual = {}
+        self._mismatch = {}
         self.adc = None
         self.adc_error = None
         self._adc_cfg_key = None
@@ -93,18 +99,52 @@ class IOManager:
         with self._lock:
             for name, on in initial_outputs.items():
                 self._outputs[name] = bool(on)
-            self.gpio, self.gpio_errors = create_gpio_backend("sim" if self.use_sim else "rpi")
-            self.gpio_name = self.gpio.name
-            if self.sim is not None:
-                self.sim.attach_gpio(self.gpio)
-            cfg = self.cfg_store.data
-            for name in IO_OUTPUTS:
-                self._setup_output(name, cfg["hardware"]["io"][name])
-            for name in IO_INPUTS:
-                self._setup_input(name, cfg["hardware"]["io"][name])
-            self._init_adc(cfg)
+            self._open_backend()
         self._sensor_thread = threading.Thread(target=self._sensor_loop, name="sensors", daemon=True)
         self._sensor_thread.start()
+
+    def _open_backend(self) -> None:
+        """Create the GPIO backend + ADC for the current mode and configure every pin."""
+        self.gpio, self.gpio_errors = create_gpio_backend("sim" if self.use_sim else "rpi")
+        self.gpio_name = self.gpio.name
+        if self.sim is not None:
+            self.sim.attach_gpio(self.gpio)
+        self.pin_errors = {}
+        self._out_pins, self._in_pins = {}, {}
+        self._out_written, self._raw_levels = {}, {}
+        self._out_actual, self._mismatch = {}, {}
+        self._last_readback = -1e9
+        cfg = self.cfg_store.data
+        for name in IO_OUTPUTS:
+            self._setup_output(name, cfg["hardware"]["io"][name])
+        for name in IO_INPUTS:
+            self._setup_input(name, cfg["hardware"]["io"][name])
+        self._init_adc(cfg)
+        if self.use_sim:
+            log.info("Hardver mód: SZIMULÁCIÓ - a GPIO lábak nem változnak")
+        else:
+            log.info("Hardver mód: valódi hardver, GPIO könyvtár: %s, kimenetek: %s", self.gpio_name, ", ".join(
+                "%s=GPIO%d" % (n, p[0]) for n, p in self._out_pins.items()))
+
+    def switch_backend(self, use_sim: bool, sim_world=None) -> None:
+        """Switch between simulation and the real hardware at runtime.
+
+        The pins of the old backend are driven inactive and released first; the logical
+        output states are carried over to the new backend.
+        """
+        with self._lock:
+            if self.gpio is not None and self.gpio.name != "nincs":
+                for name, (pin, active_high) in list(self._out_pins.items()):
+                    self._release(name, pin, inactive_level=(not active_high))
+                for name, (pin, _active_low) in list(self._in_pins.items()):
+                    self._release(name, pin)
+                try:
+                    self.gpio.close()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("GPIO lezárási hiba: %s", exc)
+            self.use_sim, self.sim = bool(use_sim), sim_world
+            self._ema = {}
+            self._open_backend()
 
     def stop(self) -> None:
         self._stop.set()
@@ -130,7 +170,13 @@ class IOManager:
             self.pin_errors.pop(name, None)
         except Exception as exc:  # noqa: BLE001
             self._out_pins[name] = (pin, active_high)
-            self.pin_errors[name] = str(exc)
+            self._pin_failed(name, pin, exc)
+
+    def _pin_failed(self, name, pin, exc) -> None:
+        if self.gpio.name == "nincs":  # no library at all: reported once through gpio_errors
+            self.pin_errors[name] = NO_GPIO_TEXT
+        else:
+            self.pin_errors[name] = "GPIO%d: %s" % (pin, exc)
             log.error("%s (GPIO%d) beállítása sikertelen: %s", IO_LABELS[name], pin, exc)
 
     def _setup_input(self, name, item):
@@ -145,8 +191,7 @@ class IOManager:
             self._raw_levels[name] = level
         except Exception as exc:  # noqa: BLE001
             self._in_pins[name] = (pin, active_low)
-            self.pin_errors[name] = str(exc)
-            log.error("%s (GPIO%d) beállítása sikertelen: %s", IO_LABELS[name], pin, exc)
+            self._pin_failed(name, pin, exc)
             logical = False
         # no edge at start-up: the debouncer starts from the current level
         self._debouncers[name] = Debouncer(logical, DEBOUNCE_S[name])
@@ -313,6 +358,26 @@ class IOManager:
                         self.pin_errors.pop(name, None)
                     except Exception:  # noqa: BLE001
                         pass
+            if now - self._last_readback >= READBACK_S or now < self._last_readback:
+                self._last_readback = now
+                self._readback()
+
+    def _readback(self) -> None:
+        """Read the output pins back and count how long they differ from the commanded level."""
+        for name, (pin, active_high) in self._out_pins.items():
+            if name in self.pin_errors:
+                self._out_actual[name], self._mismatch[name] = None, 0
+                continue
+            try:
+                level = bool(self.gpio.read(pin))
+            except Exception:  # noqa: BLE001 - reading an output back is optional
+                self._out_actual[name], self._mismatch[name] = None, 0
+                continue
+            self._out_actual[name] = level
+            if level != (self._outputs[name] == active_high):
+                self._mismatch[name] = self._mismatch.get(name, 0) + 1
+            else:
+                self._mismatch[name] = 0
 
     def outputs(self) -> dict:
         with self._lock:
@@ -331,7 +396,15 @@ class IOManager:
                 if name in IO_OUTPUTS:
                     on = self._outputs.get(name, False)
                     item["active"] = on
-                    item["level"] = on == (cfg[name]["active"] == "high")
+                    item["level"] = on == (cfg[name]["active"] == "high")  # commanded level
+                    actual = None
+                    if name not in self.pin_errors and name in self._out_pins:
+                        try:
+                            actual = bool(self.gpio.read(self._out_pins[name][0]))  # level on the pin itself
+                        except Exception:  # noqa: BLE001
+                            actual = None
+                    item["actual"] = actual
+                    item["mismatch"] = actual is not None and actual != item["level"]
                 else:
                     item["active"] = self._inputs.get(name, False)
                     item["level"] = self._raw_levels.get(name)
@@ -405,6 +478,11 @@ class IOManager:
                 "gpio_ok": self.gpio_ok,
                 "gpio_errors": list(self.gpio_errors),
                 "pin_errors": {IO_LABELS[k]: v for k, v in self.pin_errors.items()},
+                "output_mismatch": {
+                    name: {"label": IO_LABELS[name], "gpio": self._out_pins[name][0],
+                           "expected": self._outputs[name] == self._out_pins[name][1],
+                           "actual": self._out_actual.get(name)}
+                    for name, count in self._mismatch.items() if count >= MISMATCH_AFTER and name in self._out_pins},
                 "adc": self.adc.name if self.adc else "",
                 "adc_ok": self.adc_error is None,
                 "adc_error": self.adc_error,

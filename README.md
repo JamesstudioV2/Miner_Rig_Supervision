@@ -247,10 +247,12 @@ Megjegyzések:
 | W301 | ADC nem elérhető | figyelmeztetés |
 | W303 | Áramlásfigyelés kikapcsolva | figyelmeztetés |
 | W304 | Beragadt / rosszul bekötött nyomógomb | figyelmeztetés |
+| W305 | GPIO kimenet: a lábról visszaolvasott szint eltér a kiadottól (rövidzár, túlterhelés, hibás bekötés) | figyelmeztetés |
 | W401 | Miner nem elérhető | csak jelzés |
 | W402 | Miner hibát jelez | csak jelzés |
 | W403 | Miner parancs sikertelen | csak jelzés |
 | W404 | Miner nem vezérelhető (csak olvasható típus) | csak jelzés |
+| W405 | Szimulált miner maradt a listában valódi hardver módban | csak jelzés |
 | I501 | Utóhűtés aktív | tájékoztatás |
 | I502 | Kézi szivattyú üzem (légtelenítés) | tájékoztatás |
 
@@ -280,7 +282,53 @@ legyen NTP elérés, vagy szerelj be RTC modult.
 
 ---
 
-## 9. Kipróbálás valódi hardver nélkül (szimuláció)
+## 9. Hardver mód és hibaelhárítás – „a GPIO lábak nem változnak"
+
+A program kétféle módban futhat, és ezt **a webes felület dönti el**
+(**Beállítások › Kalibráció & GPIO › Hardver mód**, ugyanez a Rendszer fülön is):
+
+| Mód | Mit csinál |
+|-----|------------|
+| **Valódi hardver** | a Raspberry Pi GPIO lábait vezérli és az ADC-t olvassa |
+| **Automatikus** (alapérték) | Raspberry Pi-n valódi hardver, más gépen szimuláció |
+| **Szimuláció** | **semmit nem ad ki a valódi lábakra**, minden érték szimulált – csak teszteléshez |
+
+- A váltás **azonnal** érvényes, a programot nem kell újraindítani (csak leállított rendszernél váltható).
+- A felületen választott mód elsőbbséget élvez az indítási kapcsolókkal szemben: a `--sim` / `--hardware`
+  kapcsoló csak azt dönti el, mit jelentsen az „Automatikus".
+- Szimulációban Raspberry Pi-n a fejlécben sárga sáv figyelmeztet, rajta a **„Váltás valódi hardverre"** gombbal,
+  és a kalibrációs oldal minden élő állapota mellett „szimulált" jelzés áll.
+- Szimulációs módban a program **valódi minert nem indít el** (hiszen a valódi szivattyúk nem járnak).
+
+Ha a lábak nem változnak, ezt nézd végig:
+
+1. **Mód:** a Kalibráció & GPIO oldal tetején zöld „VALÓDI HARDVER" jelzés legyen, mellette a GPIO könyvtár neve
+   (RPi.GPIO vagy lgpio). Ha „SZIMULÁCIÓ" látszik, válts át.
+2. **Teszt:** ugyanott a kimenetek sorában a **„Teszt 2 mp"** gomb két másodpercre bekapcsolja a kimenetet.
+   Az „Élő állapot" oszlop a **lábról visszaolvasott** szintet mutatja (nem csak azt, amit a program kiadott);
+   eltérésnél piros „ELTÉRÉS!" jelzés és W305 figyelmeztetés jelenik meg.
+3. **Mérés a jó lábon:** a felület BCM számozást használ, mellette a fizikai tű száma áll – a **GPIO17 a 11. tű**,
+   a GPIO27 a 13. tű (nem a 17. és 27. tű!). A láb állapota a Pi parancssorából is lekérdezhető:
+
+```bash
+pinctrl get 17
+```
+
+   (régebbi rendszeren: `raspi-gpio get 17`)
+
+4. **GPIO hiba (E301):** ha a mód valódi hardver, de a GPIO nem használható, a felület kiírja az okát
+   (hiányzó könyvtár, jogosultság). Részletes diagnosztika a szolgáltatás felhasználójával:
+
+```bash
+cd /opt/rig-supervisor && sudo -u rigsup python3 -m rig_supervisor --diagnose --data /var/lib/rig-supervisor
+```
+
+   Hiányzó könyvtár esetén: `sudo apt install python3-rpi.gpio python3-lgpio`, jogosultsági hibánál a
+   felhasználónak a `gpio` (és `spi`, `i2c`) csoportban kell lennie – a telepítő (`sudo ./install.sh`) ezt
+   elvégzi, és a végén ki is írja ennek a diagnosztikának az eredményét.
+5. **Aktív szint:** ha a láb változik, de az SSR fordítva kapcsol, állítsd át az „Aktív szint (negálás)" oszlopot.
+
+## 10. Kipróbálás valódi hardver nélkül (szimuláció)
 
 Bármilyen gépen (Windows, Linux, Mac – Python 3.7+):
 
@@ -293,6 +341,10 @@ Majd böngészőben: `http://localhost:8080/`. A szimulátor egy egyszerű hőta
 idézhetők elő (áramlás kimaradás, szenzor szakadás/rövidzár, le nem álló miner, fizikai gombnyomás), így minden
 védelmi funkció veszélytelenül kipróbálható. Nem Raspberry Pi-n a program automatikusan szimulációs módban indul.
 
+**Figyelem:** a `--sim` kapcsolót a Raspberry Pi-n ne használd éles üzemhez – szimulációban a program nem
+vezérli a GPIO lábakat. Ha mégis így indult, a fejléc sárga sávján a „Váltás valódi hardverre" gombbal
+(vagy a Hardver mód beállítással) azonnal átváltható.
+
 Tesztek futtatása:
 
 ```bash
@@ -301,7 +353,7 @@ python3 -m unittest discover -s tests -t .
 
 ---
 
-## 10. Felépítés
+## 11. Felépítés
 
 ```
 rig_supervisor/
