@@ -7,7 +7,7 @@ const HEADER = {
   21: 'GPIO9', 22: 'GPIO25', 23: 'GPIO11', 24: 'GPIO8', 25: 'GND', 26: 'GPIO7', 27: 'ID_SD', 28: 'ID_SC', 29: 'GPIO5', 30: 'GND',
   31: 'GPIO6', 32: 'GPIO12', 33: 'GPIO13', 34: 'GND', 35: 'GPIO19', 36: 'GPIO16', 37: 'GPIO26', 38: 'GPIO20', 39: 'GND', 40: 'GPIO21',
 };
-const IO_SHORT = { pump1: 'P1 SSR', pump2: 'P2 SSR', flow1: 'F1', flow2: 'F2', btn_start: 'START', btn_stop: 'STOP' };
+const IO_SHORT = { pump1: 'P1 SSR', pump2: 'P2 SSR', flow1: 'F1', flow2: 'F2', btn_start: 'START', btn_stop: 'STOP', killswitch: 'KILL' };
 const SENSORS = ['t1', 't2', 't3', 't4'];
 const FAULT_LABELS = { open: 'Szakadás', short: 'Rövidzár', range: 'Tartományon kívül', adc: 'ADC hiba', noadc: 'Nincs ADC' };
 
@@ -472,6 +472,9 @@ export class SettingsView {
           ${switchField(cfg, 'safety.auto_resume', 'Automatikus visszaállás áramszünet / újraindulás után', 'Ha a program üzem közben indult újra, a szivattyúk azonnal elindulnak és a rendszer visszaáll üzembe.')}
           ${switchField(cfg, 'hardware.io.btn_start.enabled', 'Fizikai INDÍTÓ gomb engedélyezése')}
           ${switchField(cfg, 'hardware.io.btn_stop.enabled', 'Fizikai LEÁLLÍTÓ gomb engedélyezése')}
+          ${switchField(cfg, 'hardware.io.killswitch.enabled', 'KILLSWITCH bemenet figyelése (abszolút vészleállás)',
+            'Aktív szintnél (alapból magas) azonnal leállnak a minerek ÉS a szivattyúk – utókeringetés, utóhűtés és kézi szivattyú nélkül. ' +
+            'A rendszer csak a bemenet feloldása és nyugtázás után indítható újra. Láb és polaritás: Kalibráció & GPIO.')}
         </div>
       </div>
       ${actions('pr')}</div>`;
@@ -825,7 +828,8 @@ export class SettingsView {
           ${SENSORS.map((sid) => `<div style="display:flex;align-items:center;gap:8px"><span style="width:28px">${sid.toUpperCase()}</span>${sensorSel(sid)}</div>`).join('')}</div>
         <div class="sim-item"><b>Fizikai nyomógombok</b>
           <button class="btn btn-ok" data-simbtn="btn_start">START gomb megnyomása</button>
-          <button class="btn btn-danger" data-simbtn="btn_stop">STOP gomb megnyomása</button></div>
+          <button class="btn btn-danger" data-simbtn="btn_stop">STOP gomb megnyomása</button>
+          <label class="switch"><input type="checkbox" data-simkill ${st.killswitch ? 'checked' : ''}><i></i>KILLSWITCH bemenet aktív</label></div>
         <div class="sim-item"><b>Külső hőmérséklet (radiátor)</b>
           <div class="inp-unit"><input class="inp sm num" type="number" id="sim-amb" value="${st.ambient}"><span>°C</span></div>
           <button class="btn btn-sm" id="sim-amb-set">Beállít</button></div>
@@ -843,6 +847,7 @@ export class SettingsView {
       const t = e.target;
       if (t.dataset.simflow) sim({ action: 'fault', key: t.dataset.simflow, value: t.checked });
       else if (t.dataset.simsensor) sim({ action: 'fault', key: t.dataset.simsensor, value: t.value || null });
+      else if (t.dataset.simkill !== undefined) sim({ action: 'killswitch', value: t.checked });
       else if (t.dataset.simminer) sim({ action: 'miner', id: t.dataset.simminer, field: t.dataset.field, value: t.checked });
     });
     root.addEventListener('click', (e) => {

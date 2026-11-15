@@ -23,7 +23,8 @@ class Clock:
 
 class FakeIO:
     def __init__(self):
-        self.inputs = {"flow1": False, "flow2": False, "btn_start": False, "btn_stop": False}
+        self.inputs = {"flow1": False, "flow2": False, "btn_start": False, "btn_stop": False, "killswitch": False}
+        self.errors = {}
         self.edges = []
         self.temps = {sid: {"value": 25.0, "raw_value": 25.0, "fault": None, "fault_text": None, "voltage": 1.6,
                             "ohm": 10000.0} for sid in SENSOR_IDS}
@@ -38,6 +39,9 @@ class FakeIO:
         if self.inputs[name] != value:
             self.inputs[name] = value
             self.edges.append((name, value))
+
+    def input_error(self, name):
+        return self.errors.get(name)
 
     def sensor_snapshot(self):
         return {k: dict(v) for k, v in self.temps.items()}
@@ -199,6 +203,70 @@ class ControllerTest(unittest.TestCase):
         self.io.inputs["btn_start"] = True  # level flipped by the inversion, but no edge reported
         self.run_for(2)
         self.assertEqual(self.c.state, CT.STOPPED)
+
+    # ------------------------------------------------------------ killswitch
+    def test_killswitch_while_running(self):
+        self.start_running()
+        self.io.set_input("killswitch", True)
+        self.c.tick()  # same tick: pumps off, miners stopped - no post-circulation
+        self.assertEqual(self.io.outputs, {"pump1": False, "pump2": False})
+        self.assertEqual(self.miners.calls[-1], "stop")
+        self.assertEqual(self.c.state, CT.EMERGENCY)
+        self.assertEqual(self.c.alarm["code"], "E001")
+        self.miners.hot = (90.0, "x")  # overheat assist is suppressed
+        self.run_for(5)
+        self.assertFalse(self.io.outputs["pump1"])
+        ok, _ = self.c.manual_pump("pump1", "press")
+        self.assertFalse(ok)
+        ok, msg = self.c.request_start("teszt")
+        self.assertFalse(ok)
+        self.assertIn("KILLSWITCH", msg)
+        ok, _ = self.c.acknowledge("teszt")
+        self.assertFalse(ok)  # still active
+        self.io.set_input("killswitch", False)
+        self.run_for(1)
+        self.assertFalse(self.io.outputs["pump1"])  # latched until acknowledged
+        ok, _ = self.c.acknowledge("teszt")
+        self.assertTrue(ok)
+        self.c.tick()
+        self.assertTrue(self.io.outputs["pump1"])  # normal rules again (overheat assist)
+
+    def test_killswitch_overrides_post_circulation_and_emergency(self):
+        self.start_running()
+        self.c.request_stop("teszt")
+        self.c.tick()
+        self.assertTrue(self.io.outputs["pump1"])  # stopping: post-circulation
+        self.io.set_input("killswitch", True)
+        self.c.tick()
+        self.assertEqual(self.io.outputs, {"pump1": False, "pump2": False})
+        self.assertEqual(self.c.alarm["code"], "E001")
+
+    def test_killswitch_overrides_existing_emergency_and_restart(self):
+        self.start_running()
+        self.io.set_input("flow1", False)
+        self.run_for(3.5)
+        self.assertEqual(self.c.alarm["code"], "E102")
+        self.io.set_input("killswitch", True)
+        self.c.tick()
+        self.assertEqual(self.c.alarm["code"], "E001")
+        c2 = self._make()
+        c2.restore()
+        self.assertTrue(c2.killed)
+        self.assertEqual(c2._compute_pumps(), {"pump1": False, "pump2": False})
+
+    def test_killswitch_pin_error_trips(self):
+        self.start_running()
+        self.io.errors["killswitch"] = "GPIO5: read error"
+        self.c.tick()
+        self.assertEqual(self.c.alarm["code"], "E002")
+        self.assertFalse(self.io.outputs["pump1"])
+
+    def test_killswitch_disabled(self):
+        self.store.update({"hardware": {"io": {"killswitch": {"enabled": False}}}})
+        self.start_running()
+        self.io.set_input("killswitch", True)
+        self.run_for(1)
+        self.assertEqual(self.c.state, CT.RUNNING)
 
     def test_disabled_button_ignored(self):
         self.store.update({"hardware": {"io": {"btn_start": {"enabled": False}}}})

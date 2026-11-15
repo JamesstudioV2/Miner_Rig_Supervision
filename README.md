@@ -79,6 +79,7 @@ szakadását, rövidzárát és az ADC kommunikációs hibát a program felismer
 | F2 áramláskapcsoló (külső kör) | GPIO23 | 16 | alacsony | |
 | INDÍTÓ nyomógomb | GPIO24 | 18 | alacsony | 10 kΩ felhúzás 3,3 V-ra, lenyomva 0 |
 | LEÁLLÍTÓ nyomógomb | GPIO25 | 22 | alacsony | |
+| **KILLSWITCH** | GPIO5 | 29 | **magas** | abszolút vészleállás, belső lehúzó ellenállással |
 
 Minden láb és aktív szint a webes felületen módosítható (**Beállítások › Kalibráció & GPIO**), ahol egy
 40 tűs csatlakozó ábra is mutatja a foglalt lábakat. A program ellenőrzi az ütközéseket (két funkció egy lábon,
@@ -194,6 +195,23 @@ Ha üzem közben megáll az áramlás (3 mp tűrés), el sem indul, vagy egy fig
 után is), amíg nem nyugtázod vagy újra nem indítod a rendszert. Ha a hiba oka még fennáll (pl. túl magas hőfok),
 az indítás tiltott, és a felület kiírja az okát.
 
+### KILLSWITCH – abszolút vészleállás
+Ha a KILLSWITCH bemenet aktív (alapból: **magas szint** a GPIO5 / 29. tűn), a program **ugyanabban a vezérlési
+ciklusban** (≤ 0,1 mp):
+- **beállítástól függetlenül azonnal lekapcsolja mindkét szivattyút** – nincs utókeringetés, nincs utóhűtés,
+  a kézi légtelenítő gombok is tiltva vannak;
+- leállítási parancsot küld minden minernek;
+- E001 hibakóddal vészleállás állapotba lép (egy korábbi vészleállást is felülír).
+
+A szivattyúk addig nem kapcsolhatók be, amíg a bemenet aktív, és a feloldása után is csak **nyugtázás** (vagy
+újraindítás) után. Az állapot a program újraindulása után is megmarad. Ha a killswitch láb nem olvasható
+(GPIO hiba), az is abszolút vészleállást okoz (E002).
+
+Bekötés: 3,3 V ── [vészgomb / kontaktus] ── GPIO5; a belső lehúzó ellenállás miatt bekötetlen lábon nem old ki.
+Ha a kontaktus a GND-re húz, állítsd a polaritást „Alacsony = aktív”-ra (Kalibráció & GPIO). **Ez szoftveres
+védelem** – a szivattyúk és a minerek tápját egy valódi vészleállító áramkörnek is meg kell tudnia szakítania.
+A figyelés a Védelmek oldalon kikapcsolható.
+
 ### Kézi légtelenítés
 A főoldali **P1** és **P2** gombok **csak leállított (vagy vészleállított) rendszernél** használhatók: amíg nyomva
 tartod (egérrel vagy ujjal), az adott szivattyú jár. Biztonsági okból a böngésző folyamatosan jelez a vezérlőnek –
@@ -235,6 +253,8 @@ Megjegyzések:
 
 | Kód | Jelentés | Következmény |
 |-----|----------|--------------|
+| **E001** | **KILLSWITCH – abszolút vészleállás** | minerek és szivattyúk azonnal le, utóhűtés/kézi szivattyú tiltva |
+| E002 | A KILLSWITCH bemenet nem olvasható | mint az E001 |
 | E101 | Belső kör: nem indult meg az áramlás a szivattyú bekapcsolása után | vészleállás |
 | E102 | Belső kör: megszűnt az áramlás üzem közben | vészleállás |
 | E103 | Külső kör: nem indult meg az áramlás | vészleállás |

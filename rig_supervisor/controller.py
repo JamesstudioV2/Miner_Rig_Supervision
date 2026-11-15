@@ -69,6 +69,8 @@ class Controller:
         self.state_since = time.time()
         self._state_mono = time.monotonic()
         self.alarm = None
+        self.killed = False          # KILLSWITCH latch: pumps forced off until acknowledged
+        self.kill_input = False
         self.pumps = {"pump1": False, "pump2": False}
         self.manual = {"pump1": None, "pump2": None}
         self.assist = {"active": False, "since": None, "since_mono": 0.0, "reason": ""}
@@ -124,6 +126,7 @@ class Controller:
             if prev == EMERGENCY and self._restored.get("alarm"):
                 self.state = EMERGENCY
                 self.alarm = self._restored["alarm"]
+                self.killed = self.alarm.get("code") in ("E001", "E002")
                 self.events.add("warning", "Program indulás: a korábbi vészleállás (%s) továbbra is aktív – "
                                            "nyugtázás szükséges" % self.alarm.get("code"), source="rendszer")
                 self.miners.command_all("stop", reason="vészleállás állapot visszaállítva", source="rendszer")
@@ -173,6 +176,8 @@ class Controller:
         bump = bool(edges)
         with self._lock:
             self.inputs = inputs
+            # KILLSWITCH first - it overrides everything else in this tick
+            self._check_killswitch(inputs, io_cfg)
             start_pressed = stop_pressed = False
             for name, value in edges:
                 if not value:
@@ -203,6 +208,8 @@ class Controller:
             self.signal.bump()
 
     def _compute_pumps(self) -> dict:
+        if self.killed:  # absolute emergency stop: no post-circulation, no overheat assist, no manual run
+            return {"pump1": False, "pump2": False}
         if self.state in (STARTING, RUNNING, STOPPING):
             return {"pump1": True, "pump2": True}
         assist = self.assist["active"]
@@ -240,6 +247,40 @@ class Controller:
         elif self.state == STOPPING:
             if mono - self._state_mono >= sf["post_stop_pump_s"]:
                 self._set_state(STOPPED, "Rendszer leállítva – szivattyúk kikapcsolva")
+
+    def _check_killswitch(self, inputs: dict, io_cfg: dict) -> None:
+        ks = io_cfg.get("killswitch") or {}
+        if not ks.get("enabled"):
+            self.kill_input = False
+            self._clear_warn("kill:input", log_event=False)
+            return
+        err = self.io.input_error("killswitch") if self.io.gpio_ok else None
+        active = bool(inputs.get("killswitch")) or bool(err)
+        if active and not self.kill_input:
+            if err:
+                self._kill("E002", "a KILLSWITCH bemenet (GPIO%d) nem olvasható: %s" % (ks["gpio"], err))
+            else:
+                self._kill("E001", "a KILLSWITCH bemenet (GPIO%d) aktív" % ks["gpio"])
+        self.kill_input = active
+        if active:
+            self._warn("kill:input", "E001" if not err else "E002",
+                       "KILLSWITCH aktív – a rendszer nem indítható, a szivattyúk tiltva", "error", log_event=False)
+        else:
+            self._clear_warn("kill:input", log_event=False)
+
+    def _kill(self, code: str, message: str) -> None:
+        """Absolute emergency stop - overrides every other state and setting."""
+        self.killed = True
+        for p in ("pump1", "pump2"):
+            self.manual[p] = None
+        self._assist_off(None)
+        self.alarm = {"code": code, "title": E.describe(code), "message": message, "ts": time.time(),
+                      "prev_state": self.state}
+        self.pumps = {"pump1": False, "pump2": False}
+        self.io.set_outputs(self.pumps, time.monotonic())  # immediately, before anything else runs
+        self._set_state(EMERGENCY, "ABSZOLÚT VÉSZLEÁLLÁS %s – %s: minerek és szivattyúk azonnal leállítva"
+                        % (code, message), level="error", code=code, source="KILLSWITCH")
+        self.miners.command_all("stop", reason="KILLSWITCH (%s)" % code, source="KILLSWITCH")
 
     def _emergency(self, code: str, message: str) -> None:
         if self.state == EMERGENCY:
@@ -327,7 +368,7 @@ class Controller:
                 self._clear_warn(key)
 
     def _overheat_assist(self, mono: float, sf: dict, temps: dict) -> None:
-        allowed = sf["overheat_enabled"] and (
+        allowed = not self.killed and sf["overheat_enabled"] and (
             self.state == STOPPED or (self.state == EMERGENCY and sf["overheat_after_emergency"]))
         if not allowed:
             if self.assist["active"]:
@@ -470,6 +511,8 @@ class Controller:
     # -------------------------------------------------------------- requests
     def _start_inhibit(self):
         reasons = []
+        if self.kill_input:
+            reasons.append("a KILLSWITCH bemenet aktív")
         if not self.io.gpio_ok:
             reasons.append("a GPIO nem működik, a szivattyúk nem vezérelhetők")
         cfg = self.cfg_store.data
@@ -496,6 +539,7 @@ class Controller:
         if self.state == EMERGENCY and self.alarm:
             self.events.add("info", "Vészleállás nyugtázva újraindítással (%s)" % self.alarm["code"], source=source)
             self.alarm = None
+        self.killed = False
         self._begin_start(source)
         return True, "Indítás folyamatban"
 
@@ -525,8 +569,11 @@ class Controller:
         with self._lock:
             if self.state != EMERGENCY:
                 return False, "Nincs nyugtázandó vészleállás"
+            if self.kill_input:
+                return False, "A KILLSWITCH bemenet még aktív – előbb oldd fel"
             code = self.alarm["code"] if self.alarm else ""
             self.alarm = None
+            self.killed = False
             self._set_state(STOPPED, "Vészleállás nyugtázva (%s)" % code, source=source)
             return True, "Vészleállás nyugtázva"
 
@@ -535,6 +582,8 @@ class Controller:
             return False, "Ismeretlen szivattyú"
         with self._lock:
             if action in ("press", "hold"):
+                if self.killed:
+                    return False, "KILLSWITCH vészleállás – a szivattyúk tiltva, amíg nyugtázod"
                 if self.state not in (STOPPED, EMERGENCY):
                     if self.manual[pump] is not None:
                         self._manual_off(pump, "a rendszer üzembe lépett")
@@ -623,7 +672,9 @@ class Controller:
                     "start_inhibit": inhibit,
                     "start_allowed": self.state not in ACTIVE_STATES and inhibit is None,
                     "stop_allowed": True,
-                    "manual_allowed": self.state in (STOPPED, EMERGENCY),
+                    "manual_allowed": self.state in (STOPPED, EMERGENCY) and not self.killed,
+                    "killswitch": {"enabled": bool(io_cfg["killswitch"]["enabled"]), "active": self.kill_input,
+                                   "latched": self.killed},
                     "start_delay": sf["miner_start_delay_s"],
                     "post_stop": sf["post_stop_pump_s"],
                 },

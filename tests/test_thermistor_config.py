@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -106,6 +107,21 @@ class ConfigTest(unittest.TestCase):
             self.assertFalse(store2.created)
             self.assertTrue(store2.load_warnings)
             self.assertEqual(store2.data["safety"]["post_stop_pump_s"], 30.0)  # .bak holds the previous version
+
+    def test_old_config_gets_free_killswitch_pin(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.json")
+            old = C.default_config()
+            del old["hardware"]["io"]["killswitch"]
+            old["hardware"]["io"]["pump1"]["gpio"] = 5  # an older setup already uses GPIO5
+            with open(path, "w") as f:
+                json.dump(old, f)
+            store = C.ConfigStore(path)
+            self.assertEqual(store.load_warnings, [])
+            io = store.data["hardware"]["io"]
+            self.assertEqual(io["pump1"]["gpio"], 5)
+            self.assertEqual(io["killswitch"]["gpio"], 6)
+            self.assertEqual(io["killswitch"]["active"], "high")
 
     def test_published_dict_not_mutated(self):
         with tempfile.TemporaryDirectory() as d:

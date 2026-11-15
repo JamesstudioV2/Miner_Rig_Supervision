@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 SENSOR_IDS = ("t1", "t2", "t3", "t4")
 IO_OUTPUTS = ("pump1", "pump2")
-IO_INPUTS = ("flow1", "flow2", "btn_start", "btn_stop")
+IO_INPUTS = ("flow1", "flow2", "btn_start", "btn_stop", "killswitch")
 IO_ALL = IO_OUTPUTS + IO_INPUTS
 
 IO_LABELS = {
@@ -35,6 +35,7 @@ IO_LABELS = {
     "flow2": "F2 áramláskapcsoló (külső kör)",
     "btn_start": "Indító nyomógomb",
     "btn_stop": "Leállító nyomógomb",
+    "killswitch": "KILLSWITCH (abszolút vészleállás)",
 }
 
 # BCM GPIO number -> physical pin on the 40 pin header (Raspberry Pi 2 and newer)
@@ -92,6 +93,8 @@ _DEFAULTS = {
             "flow2": {"gpio": 23, "active": "low", "pull": "up", "enabled": True},
             "btn_start": {"gpio": 24, "active": "low", "pull": "up", "enabled": True},
             "btn_stop": {"gpio": 25, "active": "low", "pull": "up", "enabled": True},
+            # magas szint = vészleállás; belső lehúzó, így bekötetlen lábon nem old ki
+            "killswitch": {"gpio": 5, "active": "high", "pull": "down", "enabled": True},
         },
     },
     "sensors": {
@@ -406,6 +409,20 @@ def validate(cfg: dict):
     return cfg, v.errors
 
 
+def _migrate(cfg: dict, raw: dict) -> dict:
+    """Upgrade a configuration written by an older version."""
+    raw_io = ((raw.get("hardware") or {}).get("io") or {}) if isinstance(raw, dict) else {}
+    if "killswitch" not in raw_io:
+        # new input: give it a free pin so an existing assignment never collides with the default
+        io = cfg["hardware"]["io"]
+        taken = {io[n]["gpio"] for n in IO_ALL if n != "killswitch"} | set(bus_pins(cfg["hardware"]["adc"]))
+        for gpio in (5, 6, 12, 13, 16, 19, 20, 21, 26, 4, 18, 14, 15):
+            if gpio not in taken:
+                io["killswitch"]["gpio"] = gpio
+                break
+    return cfg
+
+
 class ConfigStore:
     """Thread safe holder of the current configuration."""
 
@@ -436,7 +453,7 @@ class ConfigStore:
                 raw = read_json(candidate)
                 if not isinstance(raw, dict):
                     raise ValueError("a fájl nem JSON objektum")
-                cfg, errors = validate(deep_merge(default_config(), raw))
+                cfg, errors = validate(_migrate(deep_merge(default_config(), raw), raw))
                 if errors:
                     raise ConfigError(errors)
                 if candidate != self.path:

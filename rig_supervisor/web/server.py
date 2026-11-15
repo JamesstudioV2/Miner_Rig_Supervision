@@ -524,6 +524,8 @@ def make_handler(app):
                 elif value not in (None, "open", "short"):
                     raise HttpError(400, "Érvénytelen érték")
                 sim.set_fault(key, value)
+            elif action == "killswitch":
+                sim.killswitch = bool(data.get("value"))
             elif action == "button":
                 if data.get("key") not in ("btn_start", "btn_stop"):
                     raise HttpError(400, "Ismeretlen gomb")

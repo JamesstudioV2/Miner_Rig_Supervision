@@ -95,7 +95,7 @@ def _diagnose(args) -> int:
         if setting == "sim":
             print("   !!! SZIMULÁCIÓ van beállítva - a program NEM vezérli a GPIO lábakat.")
             print("       Váltás: webes felület > Beállítások > Kalibráció & GPIO > Hardver mód")
-        for name in ("pump1", "pump2", "flow1", "flow2", "btn_start", "btn_stop"):
+        for name in ("pump1", "pump2", "flow1", "flow2", "btn_start", "btn_stop", "killswitch"):
             io = hw.get("io", {}).get(name)
             if io:
                 print("  %-10s GPIO%-2s  aktív szint: %s" % (name, io.get("gpio"), io.get("active")))

@@ -15,6 +15,8 @@ from __future__ import annotations
 SENSOR_INDEX = {"t1": 1, "t2": 2, "t3": 3, "t4": 4}
 
 CATALOG = {
+    "E001": "KILLSWITCH – abszolút vészleállás: minerek és szivattyúk azonnal leállítva",
+    "E002": "A KILLSWITCH bemenet nem olvasható – abszolút vészleállás",
     "E101": "Belső kör: nem indult meg a vízáramlás a szivattyú bekapcsolása után",
     "E102": "Belső kör: megszűnt a vízáramlás üzem közben",
     "E103": "Külső kör: nem indult meg a vízáramlás a szivattyú bekapcsolása után",

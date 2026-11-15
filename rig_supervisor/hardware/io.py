@@ -19,7 +19,7 @@ from .gpio import create_gpio_backend
 
 log = logging.getLogger(__name__)
 
-DEBOUNCE_S = {"flow1": 0.3, "flow2": 0.3, "btn_start": 0.05, "btn_stop": 0.05}
+DEBOUNCE_S = {"flow1": 0.3, "flow2": 0.3, "btn_start": 0.05, "btn_stop": 0.05, "killswitch": 0.03}
 REASSERT_S = 5.0          # outputs are re-written periodically (glitch recovery)
 NO_GPIO_TEXT = "nincs használható GPIO könyvtár"
 READBACK_S = 1.0          # outputs are read back periodically (does the pin really follow?)
@@ -378,6 +378,11 @@ class IOManager:
                 self._mismatch[name] = self._mismatch.get(name, 0) + 1
             else:
                 self._mismatch[name] = 0
+
+    def input_error(self, name: str):
+        """Setup/read error of an input pin (None when the pin works)."""
+        with self._lock:
+            return self.pin_errors.get(name)
 
     def outputs(self) -> dict:
         with self._lock:

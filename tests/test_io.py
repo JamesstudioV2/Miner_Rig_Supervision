@@ -47,9 +47,9 @@ class IOManagerTest(unittest.TestCase):
         self.assertIn(("flow1", True), edges)
 
     def test_pin_reassignment_releases_old_pin(self):
-        self.store.update({"hardware": {"io": {"pump1": {"gpio": 5}}}})
+        self.store.update({"hardware": {"io": {"pump1": {"gpio": 6}}}})
         self.assertNotIn(17, self.gpio.pins)      # old pin released (after being driven inactive)
-        self.assertTrue(self.gpio.output_level(5))  # new pin keeps the pump running
+        self.assertTrue(self.gpio.output_level(6))  # new pin keeps the pump running
 
     def test_output_inversion_is_glitch_free(self):
         calls = []

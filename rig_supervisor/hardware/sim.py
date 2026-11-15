@@ -76,6 +76,7 @@ class SimWorld:
         self.faults = {"flow1": False, "flow2": False, "t1": None, "t2": None, "t3": None, "t4": None}
         self.miners = {}
         self._buttons = {}
+        self.killswitch = False
         self._stop = threading.Event()
         self._thread = None
 
@@ -124,6 +125,7 @@ class SimWorld:
         with self._lock:
             return {
                 "faults": dict(self.faults),
+                "killswitch": self.killswitch,
                 "ambient": self.t_amb,
                 "miners": {mid: {"name": m.name, "offline": m.offline, "error": m.injected_error,
                                  "ignore_stop": m.ignore_stop} for mid, m in self.miners.items()},
@@ -149,6 +151,9 @@ class SimWorld:
             for i, name in enumerate(("flow1", "flow2")):
                 active_level = io[name]["active"] == "high"
                 self.gpio.drive_external(io[name]["gpio"], active_level if self.flow[i] else not active_level)
+            ks = io["killswitch"]
+            ks_level = ks["active"] == "high"
+            self.gpio.drive_external(ks["gpio"], ks_level if self.killswitch else not ks_level)
             for name in ("btn_start", "btn_stop"):
                 active_level = io[name]["active"] == "high"
                 pressed = self._buttons.get(name, 0.0) > mono
