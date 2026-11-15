@@ -354,7 +354,7 @@ class NotifierTest(unittest.TestCase):
         self.sent = {"email": [], "sms": []}
         self.fail = {"email": 0, "sms": 0}
 
-        def fake_email(cfg, subject, body, timeout=25.0):
+        def fake_email(cfg, subject, body, timeout=25.0, attachments=None):
             if self.fail["email"]:
                 self.fail["email"] -= 1
                 raise N.NotifyError("nincs internet")

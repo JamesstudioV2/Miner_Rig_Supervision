@@ -15,6 +15,7 @@ from .events import EventStore
 from .hardware.gpio import pi_model
 from .hardware.io import IOManager
 from .hardware.sim import SimWorld
+from .camera import Camera
 from .miners.manager import MinerManager
 from .miners.scanner import local_ipv4
 from .notify import Notifier
@@ -51,8 +52,9 @@ class App:
                                      os.path.join(data_dir, "state.json"))
         self.datalog = DataLogger(os.path.join(data_dir, "logs"), self.config, self.log_snapshot, self.events)
         # registered as an event listener right away: the start-up events are notified too
+        self.camera = Camera(self.config, data_dir, self.events)
         self.notifier = Notifier(self.config, self.events, data_dir, status_fn=self.notify_status,
-                                 url_fn=self.ui_url, site_fn=self.notify_site)
+                                 url_fn=self.ui_url, site_fn=self.notify_site, camera=self.camera)
         self.port = int(port if port is not None else self.config.data["web"]["port"])
         self.web = None
         self.stopping = False
@@ -89,6 +91,8 @@ class App:
         }
 
     def _on_config_change(self, old: dict, new: dict) -> None:
+        if old["camera"] != new["camera"]:
+            self.camera.config_changed()
         if old["hardware"]["backend"] != new["hardware"]["backend"]:
             self.apply_hardware_mode()
 
@@ -133,6 +137,7 @@ class App:
         self.web = WebServer(self, host, self.port)
         self.port = self.web.port
         self.notifier.start()
+        self.camera.start()
         self.io.start(self.controller.initial_outputs())
         hw = self.io.status()
         self.events.add("info", "Program indítása (v%s) – hardver mód: %s (%s)" % (
@@ -159,6 +164,7 @@ class App:
         if self.sim is not None:
             self.sim.stop()
         self.io.stop()
+        self.camera.stop()
         self.notifier.stop()
         self.events.close()
 

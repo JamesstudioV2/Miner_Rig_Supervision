@@ -159,6 +159,18 @@ def build_email(site: str, items: list, status: list, url: str):
     return subject, "\n".join(lines) + "\n"
 
 
+def photo_text(series_list) -> str:
+    """Lines added to the KILLSWITCH email about the attached webcam pictures."""
+    lines = ["", "Webkamera képek (csatolva):"]
+    for s in series_list:
+        for shot in s.result():
+            if shot["file"]:
+                lines.append("  +%d mp  %s  (%s)" % (shot["offset"], shot["file"], local_time(s.t0_wall + shot["actual"])))
+        if s.pending():
+            lines.append("  %d kép nem készült el: %s" % (len(s.pending()), s.error or "időtúllépés"))
+    return "\n".join(lines) + "\n"
+
+
 def build_sms(site: str, items: list, ascii_only: bool, max_len: int) -> str:
     main = sorted(items, key=_sort_key)[0]
     msg = main["message"]
@@ -173,7 +185,7 @@ def build_sms(site: str, items: list, ascii_only: bool, max_len: int) -> str:
 
 
 # --------------------------------------------------------------------- email
-def send_email(cfg: dict, subject: str, body: str, timeout: float = 25.0) -> str:
+def send_email(cfg: dict, subject: str, body: str, timeout: float = 25.0, attachments=None) -> str:
     recipients = split_emails(cfg.get("recipients"))
     if not recipients:
         raise NotifyError("nincs email címzett megadva")
@@ -188,6 +200,16 @@ def send_email(cfg: dict, subject: str, body: str, timeout: float = 25.0) -> str
     msg["Date"] = email.utils.formatdate(localtime=True)
     msg["Message-ID"] = email.utils.make_msgid(domain="rig-supervisor.local")
     msg.set_content(body)
+    attached = 0
+    for path in attachments or []:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as exc:  # deleted meanwhile - the email still goes out
+            log.warning("Csatolmány nem olvasható (%s): %s", path, exc)
+            continue
+        msg.add_attachment(data, maintype="image", subtype="jpeg", filename=os.path.basename(path))
+        attached += 1
     try:
         if security == "ssl":
             smtp = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
@@ -222,7 +244,7 @@ def send_email(cfg: dict, subject: str, body: str, timeout: float = 25.0) -> str
         raise NotifyError("az SMTP szerver nem érhető el (%s:%d): %s" % (host, port, exc or exc.__class__.__name__))
     if refused:
         raise NotifyError("a szerver visszautasította: %s" % ", ".join(refused))
-    return "email elküldve: %s" % ", ".join(recipients)
+    return "email elküldve: %s%s" % (", ".join(recipients), " (%d kép csatolva)" % attached if attached else "")
 
 
 def _smtp_text(exc) -> str:
@@ -475,7 +497,7 @@ def send_sms(cfg: dict, text: str, site: str = "") -> str:
 
 # ------------------------------------------------------------------- notifier
 class Notifier:
-    def __init__(self, config_store, events, data_dir: str, status_fn=None, url_fn=None, site_fn=None):
+    def __init__(self, config_store, events, data_dir: str, status_fn=None, url_fn=None, site_fn=None, camera=None):
         self.cfg_store = config_store
         self.events = events
         self.status_fn = status_fn or (lambda: [])
@@ -496,6 +518,8 @@ class Notifier:
         self._stop = threading.Event()
         self._threads = []
         self.history = collections.deque(maxlen=60)
+        self.camera = camera
+        self._photo_series = {}
         self._load_outbox()
         events.add_listener(self.on_event)
 
@@ -523,6 +547,19 @@ class Notifier:
         """Event log listener - must stay fast, it may run inside the controller lock."""
         if event.get("source") == SOURCE:
             return
+        series = None
+        if self.camera is not None and event.get("code") in ("E001", "E002"):
+            # the pictures are taken from the moment of the activation, whatever the notification settings
+            try:
+                series = self.camera.capture_series(event["code"], callback=self._photos_ready)
+            except Exception:  # noqa: BLE001 - a camera problem must never block the emergency path
+                log.exception("Webkamera hiba")
+            if series is not None:
+                with self._lock:
+                    self._photo_series[series.id] = series
+                    if len(self._photo_series) > 20:
+                        for sid in [k for k, v in self._photo_series.items() if v.done.is_set()][:10]:
+                            del self._photo_series[sid]
         cfg = self.cfg_store.data["notifications"]
         if not cfg["enabled"]:
             return
@@ -544,7 +581,8 @@ class Notifier:
                     self._dedup = {k: t for k, t in self._dedup.items() if mono - t < DEDUP_S}
             self._pending.append({"ts": event.get("ts") or time.time(), "code": event.get("code") or "",
                                   "level": event.get("level"), "message": event.get("message", ""),
-                                  "source": event.get("source") or "", "category": category, "channels": channels})
+                                  "source": event.get("source") or "", "category": category, "channels": channels,
+                                  "photos": series.id if series is not None else None})
             if self._pending_since is None:
                 self._pending_since = mono
             if category in CRITICAL:
@@ -601,12 +639,21 @@ class Notifier:
             if ch == "email":
                 msg["subject"], msg["body"] = build_email(site, items, status, url)
                 msg["summary"] = msg["subject"]
+                ids = [it["photos"] for it in items if it.get("photos")]
+                if ids:
+                    # the KILLSWITCH email waits for the webcam pictures (at most a few seconds)
+                    msg["photo_series"] = ids
+                    with self._lock:
+                        deadlines = [self._photo_series[i].deadline for i in ids if i in self._photo_series]
+                    msg["next_try"] = (max(deadlines) + 2.0) if deadlines else 0.0
             else:
                 sms = cfg["sms"]
                 msg["text"] = build_sms(site, items, sms["ascii"],
                                         GSM_MAX_LEN if sms["provider"] == "gsm" else SMS_MAX_LEN)
                 msg["summary"] = msg["text"]
             with self._lock:
+                if msg.get("photo_series"):
+                    self._attach_if_ready(msg)
                 box = self._outbox[ch]
                 box.append(msg)
                 while len(box) > MAX_OUTBOX:
@@ -614,6 +661,32 @@ class Notifier:
                     box.remove(drop)
             self._sender_wake[ch].set()
         self._persist()
+
+    # ------------------------------------------------------------- photos
+    def _attach_if_ready(self, msg: dict) -> bool:
+        """Lock held. Attach the pictures once every series of the message is finished."""
+        series = [self._photo_series.get(i) for i in msg["photo_series"]]
+        if any(s is not None and not s.done.is_set() for s in series):
+            return False
+        series = [s for s in series if s is not None]
+        msg["attachments"] = [x["path"] for s in series for x in s.result() if x["path"]]
+        if series:
+            text = photo_text(series)
+            body = msg["body"]
+            msg["body"] = body.replace("\n-- \n", text + "\n-- \n", 1) if "\n-- \n" in body else body + text
+        del msg["photo_series"]
+        msg["next_try"] = 0.0
+        return True
+
+    def _photos_ready(self, series) -> None:
+        changed = False
+        with self._lock:
+            for m in self._outbox["email"]:
+                if series.id in (m.get("photo_series") or ()) and self._attach_if_ready(m):
+                    changed = True
+        if changed:
+            self._persist()
+            self._sender_wake["email"].set()
 
     # ------------------------------------------------------------ sending
     def _sender_loop(self, ch: str) -> None:
@@ -704,7 +777,7 @@ class Notifier:
     def _send(self, ch: str, cfg: dict, msg: dict) -> str:
         with self._send_locks[ch]:
             if ch == "email":
-                return send_email(cfg["email"], msg["subject"], msg["body"])
+                return send_email(cfg["email"], msg["subject"], msg["body"], attachments=msg.get("attachments"))
             return send_sms(cfg["sms"], msg["text"], self.site_fn())
 
     def _record(self, ch: str, msg: dict, ok: bool, detail: str, final: bool = True, test: bool = False) -> None:
@@ -758,6 +831,7 @@ class Notifier:
                 for m in (data.get(ch) or [])[:MAX_OUTBOX]:
                     if isinstance(m, dict) and m.get("channel") == ch and ("body" in m or "text" in m):
                         m["next_try"] = 0.0
+                        m.pop("photo_series", None)  # the camera series did not survive the restart
                         self._outbox[ch].append(m)
         except Exception as exc:  # noqa: BLE001 - a broken queue file must not stop the program
             log.error("Az értesítési várólista nem olvasható: %s", exc)

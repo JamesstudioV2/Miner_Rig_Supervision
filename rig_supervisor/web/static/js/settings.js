@@ -558,6 +558,26 @@ export class SettingsView {
         </div>
       </div>
 
+      <div class="card" id="nt-cam">
+        <div class="card-title">Webkamera – KILLSWITCH fényképek</div>
+        <div class="note">Ha a <b>KILLSWITCH</b> működésbe lép és van kamera csatlakoztatva, a program az aktiválás pillanatától számítva
+          <b>0, 1, 3 és 5 másodpercnél</b> egy-egy képet készít, és csatolja a KILLSWITCH emailhez (az email ezért kb. 6 mp-cel később megy ki;
+          az SMS azonnal). A képek a Pi-n is megmaradnak (a legutóbbi 120 db). USB webkamerához az <span class="mono">ffmpeg</span>
+          program kell (<span class="mono">sudo apt install ffmpeg</span>), a Raspberry Pi kameramodulhoz az <span class="mono">rpicam-vid</span>.</div>
+        <div class="form-grid">
+          ${switchField(cfg, 'camera.enabled', 'Képek készítése KILLSWITCH esetén')}
+          <div class="field"><label>Kamera</label><select class="inp" data-path="camera.device" data-type="text" id="cam-dev">
+            <option value="${esc(cfg.camera.device)}" selected>${esc(cfg.camera.device === 'auto' ? 'Automatikus (első talált kamera)' : cfg.camera.device)}</option></select></div>
+          ${selectField(cfg, 'camera.resolution', 'Felbontás', [['640x480', '640 × 480'], ['1280x720', '1280 × 720 (HD)'], ['1920x1080', '1920 × 1080 (Full HD)']])}
+          ${switchField(cfg, 'camera.standby', 'Folyamatos készenlét (pontos 0 mp-es kép)', 'A kamera folyamatosan fut (5 kép/mp, MJPEG kameránál alig terheli a Pi-t), így a 0 mp-es kép valóban az aktiválás pillanatát mutatja. Kikapcsolva a kamera csak KILLSWITCH-kor indul, az első kép ~1 mp-et késhet.')}
+        </div>
+        <div class="cam-status" id="cam-status">Kamera keresése…</div>
+        <div class="form-actions"><span class="status-msg">A teszt a mentett kamerabeállítással készít képet.</span>
+          <button class="btn" id="cam-test">Tesztkép készítése</button></div>
+        <div id="cam-out"></div>
+        <div class="cam-gallery" id="cam-gallery"></div>
+      </div>
+
       <div class="card" id="nt-email">
         <div class="card-title">Email (SMTP)</div>
         <div class="form-grid">
@@ -665,6 +685,8 @@ export class SettingsView {
       b.textContent = on ? 'visszavonás' : 'törlés';
     });
     for (const ch of ['email', 'sms']) $(`#nt-${ch}-test`).addEventListener('click', () => this._notifyTest(ch, root));
+    $('#cam-test').addEventListener('click', () => this._cameraTest());
+    this._cameraInfo();
     $('#nt-save').addEventListener('click', () => this._save('nt', collect(root), () => this.open('notify')));
     $('#nt-reset').addEventListener('click', () => this.open('notify'));
     this._notifyChips();
@@ -675,6 +697,53 @@ export class SettingsView {
     };
     poll();
     this.hwTimer = setInterval(poll, 4000);
+  }
+
+  async _cameraInfo() {
+    let st;
+    try { st = await api('/api/camera', { quiet: true }); } catch (e) { return; }
+    const sel = $('#cam-dev');
+    const box = $('#cam-status');
+    if (!sel || !box) return;
+    const cur = this.cfg.camera.device;
+    const opts = [['auto', 'Automatikus (első talált kamera)'], ...st.devices.map((d) => [d.path, `${d.path} – ${d.name}`]), ['picam', 'Raspberry Pi kameramodul (rpicam-vid)']];
+    if (!opts.some(([v]) => v === cur)) opts.push([cur, cur + ' (nem található)']);
+    sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+    const src = st.source;
+    const tool = !src ? '' : src.kind === 'picam' ? (st.tools['rpicam-vid'] || st.tools['libcamera-vid'])
+      : (st.tools.ffmpeg || st.tools.fswebcam);
+    let html;
+    if (!st.enabled) html = '<span class="pill off">KIKAPCSOLVA</span>';
+    else if (!src) html = '<span class="pill warn">NINCS KAMERA</span> Nem található csatlakoztatott kamera – KILLSWITCH esetén kép nélkül megy az email.';
+    else if (!tool) html = `<span class="pill bad">HIÁNYZÓ PROGRAM</span> ${esc(src.name)} – ${src.kind === 'picam' ? 'telepítsd: sudo apt install rpicam-apps' : 'telepítsd: sudo apt install ffmpeg'}`;
+    else html = `<span class="pill ${st.running ? 'on' : 'off'}">${st.running ? 'KÉSZENLÉTBEN' : 'KÉSZ'}</span> ${esc(src.name)}${src.path ? ' (' + esc(src.path) + ')' : ''}`;
+    if (st.error && st.enabled && src) html += `<div class="hint" style="color:#fca5a5">${esc(st.error)}</div>`;
+    box.innerHTML = html;
+    const files = st.recent || [];
+    $('#cam-gallery').innerHTML = files.length ? `<div class="subcard-title" style="margin-top:12px">Legutóbbi KILLSWITCH képek</div><div class="thumbs">${files.map((f) =>
+      `<a href="/api/camera/files/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img loading="lazy" src="/api/camera/files/${encodeURIComponent(f)}" alt="${esc(f)}"><span>${esc(f.replace(/_[0-9a-f]{10}_/, ' ').replace('.jpg', ''))}</span></a>`).join('')}</div>` : '';
+  }
+
+  async _cameraTest() {
+    const btn = $('#cam-test');
+    const out = $('#cam-out');
+    btn.disabled = true;
+    out.innerHTML = '<div class="note" style="margin-top:12px">Kép készítése…</div>';
+    try {
+      const res = await fetch('/api/camera/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try { msg = (await res.json()).error || msg; } catch (e) { /* nem JSON */ }
+        throw new Error(msg);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      out.innerHTML = `<div class="cam-test"><img src="${url}" alt="Tesztkép"><div class="hint">Tesztkép – ${new Date().toLocaleTimeString('hu-HU')}</div></div>`;
+    } catch (e) {
+      out.innerHTML = `<div class="errors-box">✗ ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      this._cameraInfo();
+    }
   }
 
   _notifyChips() {

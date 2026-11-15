@@ -61,6 +61,7 @@ CATALOG = {
     "I606": "Miner ismét termel",
     "W601": "Értesítés küldése sikertelen",
     "W602": "Értesítési korlát elérve",
+    "W603": "Webkamera: a KILLSWITCH képek nem készültek el",
 }
 
 

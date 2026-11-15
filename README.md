@@ -246,7 +246,7 @@ Beállítás: **Beállítások › Értesítések**. A program magától küld �
 
 | Esemény | Kódok | Alapértelmezés |
 |---------|-------|----------------|
-| **KILLSWITCH** aktiválódott | E001, E002 | email + SMS, **azonnal** |
+| **KILLSWITCH** aktiválódott | E001, E002 | email (webkamera képekkel) + SMS, **azonnal** |
 | **Vészleállás** (áramlás, hőfok határérték, szenzorhiba) | E101–E214 | email + SMS, **azonnal** |
 | Kézi indítás / leállítás (web vagy fizikai gomb), vészleállás nyugtázása | I601–I603 | email + SMS |
 | **Miner abbahagyta a termelést** / indítás után nem kezdett el termelni / ismét termel | W406, W407, I606 | email + SMS |
@@ -265,6 +265,23 @@ Beállítás: **Beállítások › Értesítések**. A program magától küld �
 - A **„Teszt email/SMS küldése”** gomb a mezőkben lévő (még nem mentett) adatokkal küld; a hibát magyarul írja ki
   (rossz jelszó, nem elérhető szerver, nem található modem…). Ugyanitt látszanak a legutóbbi küldések.
 - A jelszavak, tokenek, SIM PIN és az átjáró fejlécei soha nem kerülnek vissza a böngészőbe.
+
+### Webkamera – fényképek a KILLSWITCH emailhez
+Ha a **KILLSWITCH** működésbe lép és van kamera csatlakoztatva, a program az aktiválás pillanatától számítva
+**0, 1, 3 és 5 másodpercnél** egy-egy képet készít, és **csatolja a KILLSWITCH emailhez** (az email ezért kb. 6 mp-cel
+az esemény után megy ki – az SMS továbbra is azonnal). A levélben a képek pontos időpontja is szerepel; a képek a Pi-n
+is megmaradnak (`/var/lib/rig-supervisor/snapshots/`, a legutóbbi 120 db), és a Beállítások › Értesítések oldalon
+megtekinthetők. Ugyanitt van a **„Tesztkép készítése”** gomb.
+
+- **USB webkamera**: bedugás után automatikusan felismeri. Az `ffmpeg` program kell hozzá – a telepítő felrakja, ha
+  talál USB kamerát; később: `sudo apt install ffmpeg`. MJPEG-képes kameránál (a legtöbb USB webkamera) a képeket nem kell
+  újratömöríteni, így a Pi 2-t alig terheli.
+- **Raspberry Pi kameramodul**: a „Kamera” mezőben válaszd a „Raspberry Pi kameramodul” lehetőséget (`rpicam-vid`,
+  régebbi rendszeren `libcamera-vid` kell: `sudo apt install rpicam-apps`).
+- **Folyamatos készenlét** (alapból be): a kamera folyamatosan fut 5 kép/mp sebességgel, így a 0 mp-es kép valóban
+  az aktiválás pillanatát mutatja. Kikapcsolva a kamera csak KILLSWITCH-kor indul, és az első kép ~1 mp-et késhet.
+- Ha nincs kamera, vagy nem ad képet, a KILLSWITCH email kép nélkül megy ki (legfeljebb néhány mp késéssel),
+  és **W603** figyelmeztetés jelzi.
 
 ### Email (SMTP)
 - **Gmail**: szerver `smtp.gmail.com`, port 587, STARTTLS. A Google fiókban kapcsold be a kétlépcsős azonosítást, és hozz
@@ -349,6 +366,7 @@ Megjegyzések:
 | W407 | Miner az indítás után nem kezdett el termelni | csak jelzés + értesítés |
 | W601 | Értesítés küldése sikertelen (a program újrapróbálja) | figyelmeztetés |
 | W602 | Értesítések óránkénti korlátja elérve | figyelmeztetés |
+| W603 | Webkamera: a KILLSWITCH képek (egy része) nem készült el | figyelmeztetés |
 | I501 | Utóhűtés aktív | tájékoztatás |
 | I502 | Kézi szivattyú üzem (légtelenítés) | tájékoztatás |
 | I601 / I602 | Rendszer elindítva / leállítva (kézi indítás / leállítás) | tájékoztatás + értesítés |
@@ -464,6 +482,7 @@ rig_supervisor/
   datalog.py         napi SQLite naplók, 10 GB-os korlát, grafikon lekérdezések
   events.py          eseménynapló
   notify.py          értesítések: email (SMTP), SMS (GSM modem / Twilio / HTTP átjáró), összevonás, korlátok, újrapróbálás
+  camera.py          webkamera: KILLSWITCH fényképek (USB kamera ffmpeg-gel, Pi kameramodul rpicam-vid-del)
   config.py          beállítások, ellenőrzés, mentés (config.json + .bak)
   web/server.py      beépített webszerver: JSON API + élő adatfolyam (Server-Sent Events)
   web/static/        a webes felület (HTML/CSS/JS, külső függőség nélkül)

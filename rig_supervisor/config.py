@@ -137,6 +137,12 @@ _DEFAULTS = {
         "max_size_gb": 10.0,
         "min_free_mb": 500.0,
     },
+    "camera": {
+        "enabled": True,          # KILLSWITCH esetén képek 0, 1, 3, 5 mp-nél (ha van kamera)
+        "device": "auto",         # auto | /dev/videoN | picam
+        "resolution": "1280x720",
+        "standby": True,          # a kamera folyamatosan fut (alacsony képkocka-sebességgel) -> pontos 0 mp-es kép
+    },
     "notifications": {
         "enabled": True,
         "site_url": "",          # a levelekben szereplő link (üresen: automatikus)
@@ -497,6 +503,13 @@ def validate(cfg: dict):
     v.number(lg, "min_free_mb", 0, 100000, "Minimális szabad hely")
 
     _validate_notifications(cfg["notifications"], v)
+    cam = cfg["camera"]
+    v.boolean(cam, "enabled", "Webkamera")
+    v.boolean(cam, "standby", "Webkamera készenlét")
+    v.choice(cam, "resolution", ("640x480", "1280x720", "1920x1080"), "Webkamera felbontás")
+    if not isinstance(cam.get("device"), str) or not re.match(r"^(auto|picam|/dev/video[0-9]{1,3})$", cam["device"]):
+        v.err("Webkamera eszköz: auto, picam vagy /dev/videoN")
+        cam["device"] = "auto"
     return cfg, v.errors
 
 

@@ -50,6 +50,18 @@ need_pkg RPi.GPIO python3-rpi.gpio python3-rpi-lgpio && GPIO_LIBS=1
 need_pkg lgpio python3-lgpio && GPIO_LIBS=1
 need_pkg spidev python3-spidev || true
 need_pkg smbus python3-smbus || need_pkg smbus2 python3-smbus2 || true
+# webkamera (KILLSWITCH fényképek): USB kamerához ffmpeg kell - csak akkor telepítjük, ha van USB kamera
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  UVC=0
+  for d in /sys/class/video4linux/video*; do
+    [ -e "$d/device/driver" ] && readlink "$d/device/driver" | grep -q uvcvideo && UVC=1
+  done
+  if [ "$UVC" -eq 1 ]; then
+    apt-get install -y -qq ffmpeg >/dev/null 2>&1 && echo "    + ffmpeg (USB webkamera)" || echo "    - ffmpeg nem telepíthető"
+  else
+    echo "    = nincs USB webkamera (később: sudo apt install ffmpeg)"
+  fi
+fi
 if [ "$GPIO_LIBS" -eq 0 ]; then
   echo "FIGYELEM: egyik GPIO könyvtár (RPi.GPIO / lgpio) sem telepíthető - a szivattyúk nem lesznek vezérelhetők!" >&2
 fi

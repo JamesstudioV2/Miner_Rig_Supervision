@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .. import __version__
 from ..config import (ADC_TYPES, GPIO_TO_PIN, IO_INPUTS, IO_LABELS, IO_OUTPUTS, NOTIFY_SECRETS, SENSOR_IDS,
                       ConfigError, reserved_pins, validate)
+from ..camera import CameraError
 from ..notify import NotifyError
 from ..util import deep_merge
 from ..errors import CATALOG
@@ -250,6 +251,9 @@ def make_handler(app):
             handler = ROUTES.get(key)
             if handler is not None:
                 return handler(self, query)
+            m = re.match(r"^camera/files/([0-9A-Za-z_.+-]+\.jpg)$", "/".join(parts))
+            if method == "GET" and m:
+                return self.h_camera_file(m.group(1))
             m = re.match(r"^miners/([A-Za-z0-9_-]+)/(start|stop|reboot)$", "/".join(parts))
             if method == "POST" and m:
                 self._read_json()
@@ -553,6 +557,28 @@ def make_handler(app):
                            source="web")
             self._json({"ok": True, "message": result})
 
+        def h_camera(self, query):
+            st = app.camera.status()
+            st["recent"] = app.camera.recent()
+            st["ok"] = True
+            self._json(st)
+
+        def h_camera_test(self, query):
+            self._read_json()
+            try:
+                jpeg = app.camera.snapshot()
+            except CameraError as exc:
+                return self._json({"ok": False, "error": str(exc)}, 502)
+            self._send(200, jpeg, "image/jpeg", compress=False)
+
+        def h_camera_file(self, name: str):
+            path = app.camera.file_path(name)
+            if path is None:
+                raise HttpError(404, "Nincs ilyen kép")
+            with open(path, "rb") as f:
+                data = f.read()
+            self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=86400"}, compress=False)
+
         def h_loginfo(self, query):
             self._json({"ok": True, "info": app.datalog.info()})
 
@@ -622,6 +648,8 @@ def make_handler(app):
         ("GET", "loginfo"): Handler.h_loginfo,
         ("GET", "notify"): Handler.h_notify,
         ("POST", "notify/test"): Handler.h_notify_test,
+        ("GET", "camera"): Handler.h_camera,
+        ("POST", "camera/test"): Handler.h_camera_test,
         ("POST", "sim"): Handler.h_sim,
     }
     return Handler
