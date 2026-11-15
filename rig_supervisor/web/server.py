@@ -17,8 +17,10 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .. import __version__
-from ..config import (ADC_TYPES, GPIO_TO_PIN, IO_INPUTS, IO_LABELS, IO_OUTPUTS, SENSOR_IDS, ConfigError,
-                      bus_pins)
+from ..config import (ADC_TYPES, GPIO_TO_PIN, IO_INPUTS, IO_LABELS, IO_OUTPUTS, NOTIFY_SECRETS, SENSOR_IDS,
+                      ConfigError, reserved_pins, validate)
+from ..notify import NotifyError
+from ..util import deep_merge
 from ..errors import CATALOG
 from ..hardware.gpio import diagnostics as gpio_diagnostics
 from ..miners.registry import create_driver, driver_types
@@ -50,7 +52,23 @@ def masked_config(cfg: dict) -> dict:
     for m in out["miners"]["list"]:
         m["has_password"] = bool(m.get("password"))
         m["password"] = None
+    nt = out["notifications"]
+    for section, key in NOTIFY_SECRETS:
+        nt[section]["has_" + key] = bool(nt[section].get(key))
+        nt[section][key] = None
     return out
+
+
+def strip_notify_secrets(patch_nt) -> None:
+    """Secret fields sent as null (unchanged in the form) keep the stored value."""
+    if not isinstance(patch_nt, dict):
+        return
+    for section, key in NOTIFY_SECRETS:
+        sec = patch_nt.get(section)
+        if isinstance(sec, dict):
+            sec.pop("has_" + key, None)
+            if sec.get(key, "") is None:
+                sec.pop(key, None)
 
 
 def config_meta() -> dict:
@@ -318,7 +336,7 @@ def make_handler(app):
         def h_config_get(self, query):
             self._json({"ok": True, "config": masked_config(app.config.data), "meta": config_meta(),
                         "sim": app.simulated, "mode": app.mode_info(), "version": __version__,
-                        "bus_pins": {str(k): v for k, v in bus_pins(app.config.data["hardware"]["adc"]).items()}})
+                        "bus_pins": {str(k): v for k, v in reserved_pins(app.config.data).items()}})
 
         def h_config_post(self, query):
             data = self._read_json()
@@ -345,6 +363,7 @@ def make_handler(app):
                             m["password"] = old["password"]
                         else:
                             m.pop("password", None)
+            strip_notify_secrets(patch.get("notifications"))
             hardware = patch.get("hardware")
             new_backend = hardware.get("backend") if isinstance(hardware, dict) else None
             if new_backend is not None and new_backend != app.config.data["hardware"]["backend"] \
@@ -360,7 +379,7 @@ def make_handler(app):
             app.signal.bump()
             self._json({"ok": True, "config": masked_config(app.config.data), "sim": app.simulated,
                         "mode": app.mode_info(),
-                        "bus_pins": {str(k): v for k, v in bus_pins(app.config.data["hardware"]["adc"]).items()}})
+                        "bus_pins": {str(k): v for k, v in reserved_pins(app.config.data).items()}})
 
         def h_password(self, query):
             data = self._read_json()
@@ -415,7 +434,7 @@ def make_handler(app):
         def h_hw(self, query):
             self._json({"ok": True, "pins": app.io.pin_states(), "sensors": app.io.sensor_snapshot(),
                         "hardware": app.io.status(), "mode": app.mode_info(), "diagnostics": gpio_diagnostics(),
-                        "bus_pins": {str(k): v for k, v in bus_pins(app.config.data["hardware"]["adc"]).items()}})
+                        "bus_pins": {str(k): v for k, v in reserved_pins(app.config.data).items()}})
 
         def h_miner_test(self, query):
             data = self._read_json()
@@ -505,6 +524,35 @@ def make_handler(app):
                 raise HttpError(400, "Érvénytelen paraméter")
             self._json({"ok": True, "events": app.events.query(limit, before, query.get("level"))})
 
+        def h_notify(self, query):
+            st = app.notifier.status()
+            st["ok"] = True
+            self._json(st)
+
+        def h_notify_test(self, query):
+            data = self._read_json()
+            channel = data.get("channel")
+            if channel not in ("email", "sms"):
+                raise HttpError(400, "Ismeretlen csatorna")
+            settings = copy.deepcopy(data.get("settings") or {})
+            strip_notify_secrets(settings)
+            other = "sms" if channel == "email" else "email"
+            tested = settings.get(channel) if isinstance(settings.get(channel), dict) else {}
+            tested["enabled"] = True  # the tested channel must be complete, even if not switched on yet
+            patch = {"notifications": {channel: tested}}
+            cfg, errors = validate(deep_merge(app.config.data, patch))
+            if errors:
+                return self._json({"ok": False, "error": "; ".join(errors)}, 400)
+            nt = cfg["notifications"]
+            nt[other] = app.config.data["notifications"][other]
+            try:
+                result = app.notifier.send_test(channel, nt)
+            except NotifyError as exc:
+                return self._json({"ok": False, "error": str(exc)}, 502)
+            app.events.add("info", "Teszt %s elküldve (%s)" % ("email" if channel == "email" else "SMS", result),
+                           source="web")
+            self._json({"ok": True, "message": result})
+
         def h_loginfo(self, query):
             self._json({"ok": True, "info": app.datalog.info()})
 
@@ -572,6 +620,8 @@ def make_handler(app):
         ("GET", "export.csv"): Handler.h_export,
         ("GET", "events"): Handler.h_events,
         ("GET", "loginfo"): Handler.h_loginfo,
+        ("GET", "notify"): Handler.h_notify,
+        ("POST", "notify/test"): Handler.h_notify_test,
         ("POST", "sim"): Handler.h_sim,
     }
     return Handler

@@ -17,6 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from ..util import fmt_hashrate
 from .registry import DRIVERS, create_driver
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,19 @@ class MinerRecord:
         self.next_action = None
         self.known_errors = set()
         self.offline_reported = False
+        # production monitoring (W406 / W407)
+        self.prod_alarm = None
+        self.producing_seen = False
+        self.not_producing_since = None
+        self.start_mono = None
+
+    def mark_desired(self, desired, mono: float) -> None:
+        """New desired state: restart the production monitoring for this miner."""
+        self.desired = desired
+        self.prod_alarm = None
+        self.producing_seen = False
+        self.not_producing_since = None
+        self.start_mono = mono if desired is True else None
 
     @property
     def name(self) -> str:
@@ -108,7 +122,7 @@ class MinerManager:
                 driver = create_driver(mcfg, timeout, self.sim)
                 if rec is None:
                     rec = MinerRecord(mcfg, driver, timeout)
-                    rec.desired = self.system_desired
+                    rec.mark_desired(self.system_desired, time.monotonic())
                 else:
                     if (rec.cfg["host"], rec.cfg["type"], rec.cfg["api_port"]) != \
                             (mcfg["host"], mcfg["type"], mcfg["api_port"]):
@@ -179,11 +193,73 @@ class MinerManager:
                     if not rec.offline_reported and mono >= rec.busy_until:
                         rec.offline_reported = True
                         emit.append(("warning", "%s nem elérhető: %s" % (rec.name, err), "W401"))
+            emit.extend(self._check_production(rec, mono))
         for level, msg, code in emit:
             self.events.add(level, msg, code=code, source="miner")
         if action:
             self._submit(rec, action[0], action[1], "automatika")
         self.signal.bump()
+
+    # -------------------------------------------------- production monitoring
+    def _producing(self, rec: MinerRecord) -> bool:
+        if not rec.online or not rec.data:
+            return False
+        hs = rec.data.get("hashrate") or 0
+        if hs <= 0:
+            return False
+        pct = float(self.cfg_store.data["miners"]["production_min_pct"])
+        ideal = rec.data.get("hashrate_ideal")
+        return not (ideal and pct > 0 and hs < ideal * pct / 100.0)
+
+    def _why_not_producing(self, rec: MinerRecord) -> str:
+        if not rec.online or not rec.data:
+            return "nem elérhető" + (" (%s)" % rec.last_error if rec.last_error else "")
+        d = rec.data
+        text = "hashrate %s" % fmt_hashrate(d.get("hashrate") or 0)
+        if d.get("hashrate_ideal"):
+            text += " (névleges %s)" % fmt_hashrate(d["hashrate_ideal"])
+        if d.get("errors"):
+            text += ", hibák: " + "; ".join(d["errors"][:3])
+        return text
+
+    def _check_production(self, rec: MinerRecord, mono: float) -> list:
+        """Detect a miner that stopped producing (W406) or never started (W407).
+
+        Only active while the miner is supposed to work (system running and the miner
+        not stopped individually).  Must be called with the lock held.
+        """
+        cfg = self.cfg_store.data["miners"]
+        if not rec.cfg["enabled"] or rec.desired is not True or self._blocked_in_sim(rec, "start"):
+            rec.prod_alarm, rec.not_producing_since = None, None
+            return []
+        if rec.start_mono is None:
+            rec.start_mono = mono
+        if self._producing(rec):
+            emit = []
+            if rec.prod_alarm:
+                emit.append(("info", "%s ismét termel: %s" % (rec.name, fmt_hashrate(rec.data.get("hashrate"))),
+                             "I606"))
+                rec.prod_alarm = None
+            rec.producing_seen = True
+            rec.not_producing_since = None
+            return emit
+        if rec.not_producing_since is None:
+            rec.not_producing_since = mono
+        if rec.prod_alarm:
+            return []
+        if rec.producing_seen:
+            if mono - rec.not_producing_since < float(cfg["production_loss_delay_s"]):
+                return []
+            code = "W406"
+            msg = "%s abbahagyta a termelést: %s" % (rec.name, self._why_not_producing(rec))
+        else:
+            if mono - rec.start_mono < float(cfg["production_start_timeout_s"]):
+                return []
+            code = "W407"
+            msg = "%s az indítás után %d perccel sem termel: %s" % (
+                rec.name, round((mono - rec.start_mono) / 60.0), self._why_not_producing(rec))
+        rec.prod_alarm = {"code": code, "message": msg, "since": time.time()}
+        return [("warning", msg, code)]
 
     def _reconcile_action(self, rec: MinerRecord, mono: float):
         if rec.desired is None or not rec.driver.can_control or rec.cmd_running:
@@ -254,8 +330,10 @@ class MinerManager:
         with self._lock:
             self.system_desired = action == "start"
             recs = [r for r in self._records.values() if r.cfg["enabled"]]
+            mono = time.monotonic()
             for r in recs:
-                r.desired = self.system_desired
+                if r.desired != self.system_desired or self.system_desired:
+                    r.mark_desired(self.system_desired, mono)
         sent = 0
         blocked = [r.name for r in recs if self._blocked_in_sim(r, action)]
         if blocked:
@@ -285,7 +363,7 @@ class MinerManager:
             if action in ("start", "stop"):
                 if not rec.driver.can_control:
                     return False, "Ez a miner típus nem vezérelhető"
-                rec.desired = action == "start"
+                rec.mark_desired(action == "start", time.monotonic())
             elif action == "reboot":
                 if not rec.driver.can_reboot:
                     return False, "Az újraindítás ennél a típusnál nem támogatott"
@@ -304,7 +382,7 @@ class MinerManager:
                     continue
                 hashing = (r.data.get("hashrate") or 0) > 0 or r.data.get("mode") == "normal"
                 if hashing and mono - r.last_cmd_mono >= FORCE_STOP_MIN_S:
-                    r.desired = False
+                    r.mark_desired(False, mono)
                     targets.append(r)
         for r in targets:
             self._submit(r, "stop", reason, "védelem")
@@ -358,7 +436,8 @@ class MinerManager:
                     "enabled": r.cfg["enabled"],
                     "status": self._status(r, mono),
                     "online": r.online,
-                    "has_errors": bool(d and d.get("errors")),
+                    "has_errors": bool(d and d.get("errors")) or bool(r.prod_alarm),
+                    "prod_alarm": dict(r.prod_alarm) if r.prod_alarm else None,
                     "last_seen": r.last_seen or None,
                     "last_error": r.last_error,
                     "desired": r.desired,

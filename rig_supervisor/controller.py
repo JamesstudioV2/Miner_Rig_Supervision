@@ -43,6 +43,7 @@ ACTIVE_STATES = (STARTING, RUNNING)
 PUMP_LABELS = {"pump1": "P1 (belső kör)", "pump2": "P2 (külső kör)"}
 
 TICK_S = 0.05
+AUTO_RESUME_SOURCE = "automatikus visszaállás"
 
 
 def _c(value) -> str:
@@ -133,7 +134,7 @@ class Controller:
             elif prev in (STARTING, RUNNING) and cfg["safety"]["auto_resume"]:
                 self.events.add("warning", "Program indulás üzem közben (pl. áramszünet / újraindulás) – "
                                            "a rendszer automatikusan visszaáll üzembe", source="rendszer")
-                self._begin_start("automatikus visszaállás")
+                self._begin_start(AUTO_RESUME_SOURCE)
             else:
                 if prev in (STARTING, RUNNING):
                     self.events.add("warning", "Program indulás: a rendszer üzemben volt, de az automatikus "
@@ -235,8 +236,9 @@ class Controller:
         self._miners_started = False
         self._start_source = source
         delay = self.cfg_store.data["safety"]["miner_start_delay_s"]
+        code = "I605" if source == AUTO_RESUME_SOURCE else "I601"
         self._set_state(STARTING, "Rendszer indítása (%s): szivattyúk bekapcsolva, a minerek %s mp múlva indulnak"
-                        % (source, _g(delay)), source=source)
+                        % (source, _g(delay)), code=code, source=source)
 
     def _run_sequences(self, mono: float, sf: dict) -> None:
         if self.state == STARTING:
@@ -548,7 +550,7 @@ class Controller:
             n = self.miners.command_all("stop", reason="rendszer leállítás", source=source)
             delay = self.cfg_store.data["safety"]["post_stop_pump_s"]
             self._set_state(STOPPING, "Rendszer leállítása (%s): leállítási parancs %d minernek, a szivattyúk %s mp "
-                                      "utókeringetés után állnak le" % (source, n, _g(delay)), source=source)
+                                      "utókeringetés után állnak le" % (source, n, _g(delay)), code="I602", source=source)
             return True, "Leállítás folyamatban"
         if self.state == STOPPING:
             return True, "A leállítás már folyamatban van"
@@ -574,7 +576,7 @@ class Controller:
             code = self.alarm["code"] if self.alarm else ""
             self.alarm = None
             self.killed = False
-            self._set_state(STOPPED, "Vészleállás nyugtázva (%s)" % code, source=source)
+            self._set_state(STOPPED, "Vészleállás nyugtázva (%s)" % code, code="I603", source=source)
             return True, "Vészleállás nyugtázva"
 
     def manual_pump(self, pump: str, action: str, source: str = "web"):

@@ -6,6 +6,8 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from email import message_from_bytes
+from email.header import decode_header, make_header
 
 from rig_supervisor.config import ConfigStore
 from rig_supervisor.datalog import DataLogger, day_of
@@ -189,6 +191,55 @@ class WebApiTest(unittest.TestCase):
         mid = self.app.config.data["miners"]["list"][0]["id"]
         st, d = self.req("/api/miners/%s/start" % mid, {})
         self.assertEqual(st, 409)
+
+    def test_notification_secrets_and_test_send(self):
+        from tests.test_notify import FakeSMTP
+
+        srv = FakeSMTP(user="rig@example.com", password="titok")
+        try:
+            email = {"smtp_host": "127.0.0.1", "smtp_port": srv.port, "security": "none",
+                     "username": "rig@example.com", "password": "titok", "recipients": "op@example.com"}
+            self.app.config.update({"notifications": {"email": email}})
+            st, d = self.req("/api/config")
+            em = d["config"]["notifications"]["email"]
+            self.assertIsNone(em["password"])                      # secrets never reach the browser
+            self.assertTrue(em["has_password"])
+            self.assertTrue(d["config"]["notifications"]["sms"]["has_gsm_pin"] is False)
+            em["enabled"] = True
+            st, d = self.req("/api/config", {"patch": {"notifications": {"email": em}}})
+            self.assertEqual(st, 200, d)
+            self.assertEqual(self.app.config.data["notifications"]["email"]["password"], "titok")  # null = keep
+            self.assertNotIn("has_password", self.app.config.data["notifications"]["email"])
+
+            # test send with the form's (unsaved) values, stored password used
+            st, d = self.req("/api/notify/test", {"channel": "email", "settings": {"email": dict(
+                em, recipients="other@example.com")}})
+            self.assertEqual(st, 200, d)
+            self.assertEqual(srv.messages[-1]["rcpt"], ["other@example.com"])
+            subject = message_from_bytes(srv.messages[-1]["data"])["Subject"]
+            self.assertIn("Teszt értesítés", str(make_header(decode_header(subject))))
+            st, d = self.req("/api/notify/test", {"channel": "email", "settings": {"email": dict(em, password="rossz")}})
+            self.assertEqual(st, 502)
+            self.assertIn("bejelentkezés", d["error"])
+            st, d = self.req("/api/notify/test", {"channel": "email", "settings": {"email": dict(em, smtp_host="")}})
+            self.assertEqual(st, 400)
+            self.assertIn("SMTP szerver", d["error"])
+            st, d = self.req("/api/notify/test", {"channel": "sms", "settings": {"sms": {
+                "provider": "gsm", "gsm_port": "/dev/nincs-ilyen-port", "recipients": "06 30 123 4567"}}})
+            self.assertEqual(st, 502)
+            self.assertIn("nem található", d["error"])
+            st, d = self.req("/api/notify")
+            self.assertEqual(st, 200)
+            self.assertEqual([h["ok"] for h in d["history"][:3]], [False, False, True])
+            self.assertTrue(all(h["test"] for h in d["history"][:3]))
+
+            # an explicit empty string clears a secret
+            st, d = self.req("/api/config", {"patch": {"notifications": {"email": {"enabled": False, "password": ""}}}})
+            self.assertEqual(st, 200, d)
+            self.assertEqual(self.app.config.data["notifications"]["email"]["password"], "")
+        finally:
+            self.app.config.update({"notifications": {"email": {"enabled": False}}})
+            srv.stop()
 
 
 if __name__ == "__main__":

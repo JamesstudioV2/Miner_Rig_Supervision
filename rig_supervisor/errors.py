@@ -47,10 +47,20 @@ CATALOG = {
     "W402": "Miner hibát jelez",
     "W403": "Miner parancs sikertelen",
     "W404": "Miner nem vezérelhető (csak olvasható típus)",
+    "W406": "Miner abbahagyta a termelést",
+    "W407": "Miner nem kezdett el termelni az indítás után",
     "W405": "Szimulált miner valódi hardver módban",
     "I501": "Utóhűtés aktív",
     "I502": "Kézi szivattyú üzem (légtelenítés)",
     "I503": "Szimulációs mód",
+    "I601": "Rendszer elindítva (kézi indítás)",
+    "I602": "Rendszer leállítva (kézi leállítás)",
+    "I603": "Vészleállás nyugtázva",
+    "I604": "A program elindult (újraindulás / áramszünet után)",
+    "I605": "Automatikus visszaállás üzembe újraindulás után",
+    "I606": "Miner ismét termel",
+    "W601": "Értesítés küldése sikertelen",
+    "W602": "Értesítési korlát elérve",
 }
 
 

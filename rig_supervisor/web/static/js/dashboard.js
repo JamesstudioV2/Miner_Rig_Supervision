@@ -181,6 +181,7 @@ export class Dashboard {
       if (m.data && m.data.errors && m.data.errors.length && m.online) {
         items.push({ level: 'warning', code: 'W402', message: `${m.name}: ${m.data.errors.join('; ')}` });
       }
+      if (m.prod_alarm) items.push({ level: 'warning', code: m.prod_alarm.code, message: m.prod_alarm.message, since: m.prod_alarm.since });
     }
     const fake = (st.miners || []).filter((m) => m.enabled && m.type === 'simulated');
     if (!st.sim && fake.length) {
@@ -214,6 +215,7 @@ export class Dashboard {
         <div class="mstat"><label>${third[0]}</label><span>${online ? third[1] : '—'}</span></div>
       </div>
       ${errs.length ? `<div class="mcard-errors">${errs.map((e) => `<div>⚠ ${esc(e)}</div>`).join('')}</div>` : ''}
+      ${m.prod_alarm ? `<div class="mcard-errors"><div class="prod">⚠ ${esc(m.prod_alarm.code)} – ${m.prod_alarm.code === 'W407' ? 'nem kezdett el termelni' : 'nem termel'} (${ago(m.prod_alarm.since)})</div></div>` : ''}
       ${m.last_cmd && !m.last_cmd.ok ? `<div class="mcard-errors"><div class="err">Parancs sikertelen (${esc(ACTION_LABELS[m.last_cmd.action] || m.last_cmd.action)}): ${esc(m.last_cmd.message)}</div></div>` : ''}
       <div class="mcard-foot">${foot}</div></div>`;
   }
@@ -273,6 +275,7 @@ export class Dashboard {
         <span class="badge ${m.status}">${STATUS_LABELS[m.status] || m.status}</span>
         <span class="mcard-host">${esc(m.host)} · ${esc(m.type_label)}</span></div>
       ${!online && m.last_error ? `<div class="note warn">${esc(m.last_error)}</div>` : ''}
+      ${m.prod_alarm ? `<div class="note warn"><b>${esc(m.prod_alarm.code)}</b> ${esc(m.prod_alarm.message)} (${ago(m.prod_alarm.since)})</div>` : ''}
       ${(d.errors || []).length && online ? `<div class="errors-box"><b>A miner hibát jelez:</b><ul>${d.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div><br>` : ''}
       <div class="detail-grid">
         ${kv('Modell', esc(d.model || '—'))}${kv('Firmware', esc(d.firmware || '—'))}${kv('Üzemmód', MODE_LABELS[d.mode] || '—')}

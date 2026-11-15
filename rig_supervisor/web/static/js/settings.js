@@ -1,4 +1,4 @@
-// Beállítások: Minerek, Védelmek, Kalibráció & GPIO, Rendszer.
+// Beállítások: Minerek, Védelmek, Értesítések, Kalibráció & GPIO, Rendszer.
 import { api, $, $$, esc, toast, openModal, confirmDialog, num, temp, hashrate, bytes, dateTime, STATUS_LABELS } from './util.js';
 
 const HEADER = {
@@ -10,6 +10,16 @@ const HEADER = {
 const IO_SHORT = { pump1: 'P1 SSR', pump2: 'P2 SSR', flow1: 'F1', flow2: 'F2', btn_start: 'START', btn_stop: 'STOP', killswitch: 'KILL' };
 const SENSORS = ['t1', 't2', 't3', 't4'];
 const FAULT_LABELS = { open: 'Szakadás', short: 'Rövidzár', range: 'Tartományon kívül', adc: 'ADC hiba', noadc: 'Nincs ADC' };
+// értesítési kategóriák: [azonosító, megnevezés, leírás, kritikus (azonnal, korlát nélkül)]
+const NOTIFY_CATS = [
+  ['killswitch', 'KILLSWITCH aktiválódott', 'E001, E002 – abszolút vészleállás: minerek és szivattyúk azonnal leállítva', true],
+  ['emergency', 'Vészleállás', 'Áramlás kimaradás, hőfok határérték túllépés, szenzorhiba (E101–E214)', true],
+  ['manual', 'Kézi indítás / leállítás', 'Webes felületről vagy fizikai gombbal, vészleállás nyugtázása (I601–I603)'],
+  ['miner_production', 'Miner nem termel', 'Abbahagyta a termelést / indítás után nem kezdett el termelni (W406, W407), ismét termel (I606)'],
+  ['errors', 'Egyéb hibák', 'Pl. a GPIO nem vezérelhető, a szivattyúk nem kapcsolhatók (E301)'],
+  ['warnings', 'Figyelmeztetések', 'Miner hibát jelez / nem elérhető, hőfok- és szenzor figyelmeztetés, ADC hiba (W2xx–W4xx)'],
+  ['restart', 'Program újraindulás', 'Áramszünet vagy újraindítás után (I604), automatikus visszaállás üzembe (I605)'],
+];
 
 function get(obj, path) { return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function setPath(obj, path, value) {
@@ -27,9 +37,26 @@ function numField(cfg, path, label, unit, { step = 'any', min, max, hint } = {})
       data-path="${path}" data-type="num" value="${v === null || v === undefined ? '' : v}">${unit ? `<span>${esc(unit)}</span>` : ''}</div>
     ${hint ? `<small>${hint}</small>` : ''}</div>`;
 }
-function textField(cfg, path, label, hint) {
-  return `<div class="field"><label>${esc(label)}</label><input class="inp" type="text" data-path="${path}" data-type="text" value="${esc(get(cfg, path) || '')}">
+function textField(cfg, path, label, hint, { placeholder = '', mono = false, list = '', wide = false } = {}) {
+  return `<div class="field${wide ? ' wide' : ''}"><label>${esc(label)}</label><input class="inp${mono ? ' mono' : ''}" type="text" data-path="${path}" data-type="text"
+    value="${esc(get(cfg, path) || '')}" placeholder="${esc(placeholder)}" ${list ? `list="${list}"` : ''} autocomplete="off" spellcheck="false">
     ${hint ? `<small>${hint}</small>` : ''}</div>`;
+}
+function areaField(cfg, path, label, hint, { placeholder = '', rows = 2, mono = false } = {}) {
+  return `<div class="field wide"><label>${esc(label)}</label><textarea class="inp${mono ? ' mono' : ''}" rows="${rows}" data-path="${path}" data-type="text"
+    placeholder="${esc(placeholder)}" spellcheck="false">${esc(get(cfg, path) || '')}</textarea>${hint ? `<small>${hint}</small>` : ''}</div>`;
+}
+// Titkos mező: a szerver sosem küldi vissza az értékét. Üresen hagyva a tárolt érték marad (null),
+// a "törlés" gombbal üres szöveget küldünk, ami törli.
+function secretField(cfg, path, label, hint, { textarea = false, placeholder = '', wide = false } = {}) {
+  const keys = path.split('.');
+  const has = get(cfg, keys.slice(0, -1).concat('has_' + keys[keys.length - 1]).join('.'));
+  const ph = has ? '(változatlan – a mentett érték nem jelenik meg)' : placeholder;
+  const input = textarea
+    ? `<textarea class="inp mono" rows="2" data-path="${path}" data-type="secret" placeholder="${esc(ph)}" data-ph="${esc(ph)}" spellcheck="false"></textarea>`
+    : `<input class="inp" type="password" data-path="${path}" data-type="secret" placeholder="${esc(ph)}" data-ph="${esc(ph)}" autocomplete="new-password">`;
+  return `<div class="field${wide || textarea ? ' wide' : ''}"><label>${esc(label)}${has ? ` <button type="button" class="linkbtn" data-clear="${path}">törlés</button>` : ''}</label>
+    ${input}${hint ? `<small>${hint}</small>` : ''}</div>`;
 }
 function switchField(cfg, path, label, hint) {
   return `<div class="field"><label class="switch"><input type="checkbox" data-path="${path}" data-type="bool" ${get(cfg, path) ? 'checked' : ''}><i></i>${esc(label)}</label>
@@ -47,6 +74,7 @@ function collect(root) {
     const t = el.dataset.type;
     let v;
     if (t === 'bool') v = el.checked;
+    else if (t === 'secret') v = el.value !== '' ? el.value : el.dataset.cleared ? '' : null;
     else if (t === 'num' || t === 'int') {
       if (el.value.trim() === '') v = null;
       else v = t === 'int' ? parseInt(el.value, 10) : parseFloat(el.value.replace(',', '.'));
@@ -113,6 +141,7 @@ export class SettingsView {
     if (!this.cfg) return;
     if (sub === 'miners') this._miners(body);
     else if (sub === 'protect') this._protect(body);
+    else if (sub === 'notify') this._notify(body);
     else if (sub === 'calib') this._calib(body);
     else this._system(body);
     this.live();
@@ -480,6 +509,220 @@ export class SettingsView {
       ${actions('pr')}</div>`;
     $('#pr-save').addEventListener('click', () => this._save('pr', collect($('#protect'))));
     $('#pr-reset').addEventListener('click', () => this.open('protect'));
+  }
+
+  // --------------------------------------------------------- értesítések
+  _notify(body) {
+    const cfg = this.cfg;
+    const nt = cfg.notifications;
+    const rules = NOTIFY_CATS.map(([id, label, desc, critical]) => `<tr>
+        <td><b>${esc(label)}</b>${critical ? ' <span class="pill bad">azonnal</span>' : ''}<div class="hint">${esc(desc)}</div></td>
+        ${['email', 'sms'].map((ch) => `<td class="c"><label class="switch" title="${ch === 'email' ? 'Email' : 'SMS'}"><input type="checkbox"
+          data-path="notifications.rules.${id}.${ch}" data-type="bool" ${nt.rules[id] && nt.rules[id][ch] ? 'checked' : ''}><i></i></label></td>`).join('')}</tr>`).join('');
+    const gsmPorts = ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2', '/dev/ttyUSB3', '/dev/ttyACM0', '/dev/serial0', '/dev/ttyAMA0', '/dev/ttyS0'];
+    body.innerHTML = `<div id="notify">
+      <div class="card">
+        <div class="card-title">Automatikus értesítések</div>
+        <div class="form-grid">
+          ${switchField(cfg, 'notifications.enabled', 'Értesítések bekapcsolva (főkapcsoló)', 'Kikapcsolva semmilyen email vagy SMS nem megy ki.')}
+          <div class="field"><label>Csatornák (mentett állapot)</label><div class="nt-chips" id="nt-chips"></div></div>
+        </div>
+        <div class="subcard-title" style="margin-top:16px">Legutóbbi értesítések <span class="muted" id="nt-queue"></span></div>
+        <div class="nt-history" id="nt-history"><div class="empty-note">Betöltés…</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Mikor küldjön értesítést?</div>
+        <div class="note">A <b>KILLSWITCH</b> és a <b>vészleállás</b> üzenete azonnal és korlát nélkül megy ki. A többi eseményt a program a lent megadott
+          ideig gyűjti, és egy üzenetben küldi el; ugyanazt a hibát 10 percen belül nem ismétli. Sikertelen küldésnél (pl. nincs internet) a program
+          később újrapróbálja – az üzenet áramszünet után sem vész el. Az email tartalmazza a rendszer pillanatnyi állapotát is (hőfokok, szivattyúk, minerek).</div>
+        <div class="tbl-wrap"><table class="tbl rules-tbl"><thead><tr><th>Esemény</th><th class="c">Email</th><th class="c">SMS</th></tr></thead>
+          <tbody>${rules}</tbody></table></div>
+        <div class="form-grid" style="margin-top:14px">
+          ${numField(cfg, 'notifications.batch_s', 'Események összevonása', 'mp', { min: 0, max: 300, hint: 'Ennyi ideig gyűjti a nem sürgős eseményeket egy üzenetbe (0 = nincs összevonás).' })}
+          ${textField(cfg, 'notifications.site_url', 'A webes felület címe az üzenetekben', 'Üresen automatikus (a Pi helyi IP címe). Távoli eléréshez (VPN, port továbbítás) írd be a külső címet.',
+            { placeholder: 'http://192.168.1.50:8080/', mono: true, wide: true })}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Miner termelés figyelése</div>
+        <div class="note">Ha egy engedélyezett miner üzem közben <b>nem termel</b> – nem érhető el, nem bányászik, vagy a hashrate a névleges érték megadott
+          százaléka alá esik –, a program <b>W406</b> (abbahagyta a termelést) vagy <b>W407</b> (az indítás után nem kezdett el termelni) hibakódot ad és értesít.
+          Ez a rendszert <b>nem állítja le</b>. A szándékosan leállított minerre nem jelez.</div>
+        <div class="form-grid">
+          ${numField(cfg, 'miners.production_loss_delay_s', 'Kiesés tűrése', 'mp', { min: 10, max: 7200, hint: 'Ennél rövidebb kiesés (pl. pool váltás, újracsatlakozás) nem okoz riasztást.' })}
+          ${numField(cfg, 'miners.production_start_timeout_s', 'Felfutási idő indítás után', 'mp', { min: 60, max: 7200, hint: 'Ennyi időn belül el kell kezdenie termelni (Antminer: hidegindításnál 5–10 perc is lehet).' })}
+          ${numField(cfg, 'miners.production_min_pct', 'Termelés alsó határa', '%', { min: 0, max: 95, hint: 'A névleges hashrate ennyi %-a alatt nem számít termelésnek (0 = bármilyen hashrate elég).' })}
+          ${switchField(cfg, 'notifications.notify_recovery', 'Értesítés, ha a miner ismét termel (I606)')}
+        </div>
+      </div>
+
+      <div class="card" id="nt-email">
+        <div class="card-title">Email (SMTP)</div>
+        <div class="form-grid">
+          ${switchField(cfg, 'notifications.email.enabled', 'Email értesítés bekapcsolva')}
+          <div class="field"><label>Gyors beállítás</label><select class="inp" id="nt-preset">
+            <option value="">– szolgáltató kiválasztása –</option>
+            <option value="smtp.gmail.com|587|starttls">Gmail (smtp.gmail.com, 587, STARTTLS)</option>
+            <option value="smtp.mail.yahoo.com|465|ssl">Yahoo (smtp.mail.yahoo.com, 465, SSL)</option>
+          </select><small>Kitölti a szerver mezőket. Más szolgáltatónál az SMTP adatokat a szolgáltató súgója tartalmazza
+            (a Microsoft/Outlook fiókok jelszavas SMTP belépést általában már nem engednek).</small></div>
+          ${textField(cfg, 'notifications.email.smtp_host', 'SMTP szerver', '', { placeholder: 'smtp.gmail.com', mono: true })}
+          ${numField(cfg, 'notifications.email.smtp_port', 'Port', '', { step: 1, min: 1, max: 65535 })}
+          ${selectField(cfg, 'notifications.email.security', 'Titkosítás', [['starttls', 'STARTTLS (587)'], ['ssl', 'SSL/TLS (465)'], ['none', 'Nincs titkosítás (25)']])}
+          ${textField(cfg, 'notifications.email.username', 'Felhasználónév', 'Általában a teljes email cím.', { placeholder: 'farm.riasztas@gmail.com' })}
+          ${secretField(cfg, 'notifications.email.password', 'Jelszó', 'Gmailnél <b>alkalmazásjelszó</b> kell (Google fiók › Biztonság › Kétlépcsős azonosítás › Alkalmazásjelszavak), a normál jelszó nem működik.')}
+          ${textField(cfg, 'notifications.email.sender', 'Feladó címe', 'Üresen a felhasználónév.', { placeholder: '(a felhasználónév)' })}
+          ${numField(cfg, 'notifications.email.max_per_hour', 'Óránként legfeljebb', 'db', { step: 1, min: 1, max: 1000, hint: 'A KILLSWITCH és vészleállás üzenetekre nem vonatkozik.' })}
+          ${areaField(cfg, 'notifications.email.recipients', 'Címzettek', 'Több cím vesszővel vagy soronként.', { placeholder: 'tulajdonos@example.com, karbantarto@example.com' })}
+        </div>
+        <div class="form-actions"><span class="status-msg">A teszt a mezőkben lévő (még nem mentett) adatokkal küld.</span>
+          <button class="btn" id="nt-email-test">Teszt email küldése</button></div>
+        <div id="nt-email-out"></div>
+      </div>
+
+      <div class="card" id="nt-sms">
+        <div class="card-title">SMS</div>
+        <div class="form-grid">
+          ${switchField(cfg, 'notifications.sms.enabled', 'SMS értesítés bekapcsolva')}
+          ${selectField(cfg, 'notifications.sms.provider', 'SMS küldés módja', [['gsm', 'GSM modem (saját SIM kártya)'], ['twilio', 'Twilio (internetes szolgáltatás)'], ['http', 'HTTP SMS átjáró (egyéni API)']])}
+          ${numField(cfg, 'notifications.sms.max_per_hour', 'Óránként legfeljebb', 'db', { step: 1, min: 1, max: 500, hint: 'A KILLSWITCH és vészleállás üzenetekre nem vonatkozik.' })}
+          ${switchField(cfg, 'notifications.sms.ascii', 'Ékezetek nélkül (ajánlott)', 'Ékezettel egy SMS csak 70 karakteres lehet. GSM modemnél mindig ékezet nélkül megy (160 karakter).')}
+          ${areaField(cfg, 'notifications.sms.recipients', 'Telefonszámok', 'Nemzetközi formátumban, több szám vesszővel vagy soronként.', { placeholder: '+36301234567, +36201234567' })}
+        </div>
+        <div data-prov="gsm">
+          <div class="subcard-title" style="margin-top:16px">GSM modem</div>
+          <div class="form-grid">
+            ${textField(cfg, 'notifications.sms.gsm_port', 'Soros port', 'USB modem: /dev/ttyUSB0 (SIM7600: gyakran /dev/ttyUSB2). GPIO-ra kötött modul: /dev/serial0.', { mono: true, list: 'nt-ports' })}
+            ${selectField(cfg, 'notifications.sms.gsm_baud', 'Sebesség', [9600, 19200, 38400, 57600, 115200].map((b) => [b, b + ' baud']), 'int')}
+            ${secretField(cfg, 'notifications.sms.gsm_pin', 'SIM PIN kód', 'Csak ha a SIM kártya PIN kódot kér (ajánlott a PIN kérést egy telefonban kikapcsolni).', { placeholder: 'nincs' })}
+          </div>
+          <datalist id="nt-ports">${gsmPorts.map((p) => `<option value="${p}">`).join('')}</datalist>
+          <div class="note" style="margin-top:12px">Bármely AT parancsos GSM modem jó (SIM800C/SIM800L, SIM7600, Huawei „stick” módban stb.). <b>USB-s modemet</b> elég bedugni.
+            <b>GPIO-ra kötött modulnál</b> (UART): modul TX → GPIO15 / RXD (10. tű), modul RX → GPIO14 / TXD (8. tű), GND → GND; a modul kapjon külön, legalább 2 A-es tápot
+            (ne a Pi 3,3 V-járól), és 3,3 V-os jelszintet. Ilyenkor a Pi-n kapcsold ki a soros konzolt: <span class="mono">sudo raspi-config</span> › Interface Options › Serial Port ›
+            login shell: <b>No</b>, serial hardware: <b>Yes</b>, majd újraindítás. A GPIO14/15 lábat ekkor a program más funkcióra nem engedi kiosztani.</div>
+        </div>
+        <div data-prov="twilio">
+          <div class="subcard-title" style="margin-top:16px">Twilio</div>
+          <div class="form-grid">
+            ${textField(cfg, 'notifications.sms.twilio_sid', 'Account SID', '', { placeholder: 'AC…', mono: true })}
+            ${secretField(cfg, 'notifications.sms.twilio_token', 'Auth token')}
+            ${textField(cfg, 'notifications.sms.twilio_from', 'Feladó szám (Twilio szám)', '', { placeholder: '+15005550006', mono: true })}
+          </div>
+          <div class="note" style="margin-top:12px">A twilio.com konzolon található az Account SID és az Auth token. Internetkapcsolat szükséges – áramszünetnél vagy
+            internet kiesésnél a GSM modem megbízhatóbb.</div>
+        </div>
+        <div data-prov="http">
+          <div class="subcard-title" style="margin-top:16px">HTTP SMS átjáró</div>
+          <div class="form-grid">
+            ${selectField(cfg, 'notifications.sms.http_method', 'Metódus', [['GET', 'GET'], ['POST', 'POST']])}
+            ${selectField(cfg, 'notifications.sms.http_content_type', 'Törzs formátuma (POST)', [['application/json', 'JSON'], ['application/x-www-form-urlencoded', 'Űrlap (urlencoded)'], ['text/plain', 'Szöveg']])}
+            ${textField(cfg, 'notifications.sms.http_url', 'URL', '', { placeholder: 'https://api.example.com/sms?to={to}&text={message}', mono: true, wide: true })}
+            ${areaField(cfg, 'notifications.sms.http_body', 'Törzs (POST)', '', { placeholder: '{"to": "{to}", "text": "{message}"}', mono: true })}
+            ${secretField(cfg, 'notifications.sms.http_headers', 'Fejlécek (soronként: Név: érték)', 'Pl. API kulcs: <span class="mono">Authorization: Bearer …</span> – titkosként kezelve.', { textarea: true, placeholder: 'X-Api-Key: …' })}
+          </div>
+          <div class="note" style="margin-top:12px">Helyettesítők: <span class="mono">{message}</span> az üzenet, <span class="mono">{to}</span> a telefonszám (+36…),
+            <span class="mono">{to_plain}</span> a szám csak számjegyekkel, <span class="mono">{site}</span> a telephely neve. Ha az URL-ben vagy a törzsben van
+            <span class="mono">{to}</span>, minden címzettnek külön kérés megy; ha nincs, egyetlen kérés megy, és telefonszám sem kell.
+            Így bármely SMS szolgáltató (vagy pl. Telegram bot) bekötható:
+            <span class="mono">https://api.telegram.org/bot&lt;TOKEN&gt;/sendMessage?chat_id=&lt;ID&gt;&amp;text={message}</span></div>
+        </div>
+        <div class="form-actions"><span class="status-msg">A teszt a mezőkben lévő (még nem mentett) adatokkal küld.</span>
+          <button class="btn" id="nt-sms-test">Teszt SMS küldése</button></div>
+        <div id="nt-sms-out"></div>
+      </div>
+      ${actions('nt')}</div>`;
+    const root = $('#notify');
+    const provSel = root.querySelector('[data-path="notifications.sms.provider"]');
+    const methodSel = root.querySelector('[data-path="notifications.sms.http_method"]');
+    const toggle = () => {
+      for (const el of $$('[data-prov]', root)) el.hidden = el.dataset.prov !== provSel.value;
+      const post = methodSel.value === 'POST';
+      for (const p of ['notifications.sms.http_body', 'notifications.sms.http_content_type']) {
+        root.querySelector(`[data-path="${p}"]`).closest('.field').hidden = !post;
+      }
+    };
+    provSel.addEventListener('change', toggle);
+    methodSel.addEventListener('change', toggle);
+    toggle();
+    $('#nt-preset').addEventListener('change', (e) => {
+      if (!e.target.value) return;
+      const [host, port, sec] = e.target.value.split('|');
+      root.querySelector('[data-path="notifications.email.smtp_host"]').value = host;
+      root.querySelector('[data-path="notifications.email.smtp_port"]').value = port;
+      root.querySelector('[data-path="notifications.email.security"]').value = sec;
+    });
+    root.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-clear]');
+      if (!b) return;
+      const inp = root.querySelector(`[data-path="${b.dataset.clear}"]`);
+      const on = !inp.dataset.cleared;
+      if (on) inp.dataset.cleared = '1'; else delete inp.dataset.cleared;
+      inp.value = '';
+      inp.placeholder = on ? '(mentéskor törlődik)' : inp.dataset.ph;
+      b.textContent = on ? 'visszavonás' : 'törlés';
+    });
+    for (const ch of ['email', 'sms']) $(`#nt-${ch}-test`).addEventListener('click', () => this._notifyTest(ch, root));
+    $('#nt-save').addEventListener('click', () => this._save('nt', collect(root), () => this.open('notify')));
+    $('#nt-reset').addEventListener('click', () => this.open('notify'));
+    this._notifyChips();
+    const poll = async () => {
+      try {
+        this._renderNotifyHistory(await api('/api/notify', { quiet: true }));
+      } catch (e) { /* átmeneti hiba */ }
+    };
+    poll();
+    this.hwTimer = setInterval(poll, 4000);
+  }
+
+  _notifyChips() {
+    const nt = this.cfg.notifications;
+    const box = $('#nt-chips');
+    if (!box) return;
+    const prov = { gsm: 'GSM modem', twilio: 'Twilio', http: 'HTTP átjáró' }[nt.sms.provider] || nt.sms.provider;
+    const count = (text, re) => (text || '').split(re).filter((x) => x.trim()).length;
+    const chip = (on, label, detail) => `<span class="pill ${!nt.enabled ? 'off' : on ? 'on' : 'off'}">${label}: ${on ? 'BE' : 'KI'}</span>${on && detail ? ` <span class="hint">${esc(detail)}</span>` : ''}`;
+    box.innerHTML = `<div>${chip(nt.email.enabled, 'Email', count(nt.email.recipients, /[,;\s]+/) + ' címzett')}</div>
+      <div>${chip(nt.sms.enabled, 'SMS', prov + ', ' + count(nt.sms.recipients, /[,;\n]+/) + ' telefonszám')}</div>
+      ${nt.enabled ? '' : '<div><span class="pill bad">A főkapcsoló ki van kapcsolva</span></div>'}`;
+  }
+
+  _renderNotifyHistory(st) {
+    const box = $('#nt-history');
+    if (!box || this.sub !== 'notify') return;
+    const q = st.queue || [];
+    const nextIn = q.length ? Math.min(...q.map((m) => m.next_in)) : 0;
+    $('#nt-queue').textContent = q.length ? `· ${q.length} üzenet vár küldésre${nextIn ? ` (következő próbálkozás ${nextIn} mp múlva)` : ''}` : '';
+    const hist = (st.history || []).slice(0, 12);
+    if (!hist.length) {
+      box.innerHTML = '<div class="empty-note">Még nem ment ki értesítés. A beállítások után küldj egy tesztet!</div>';
+      return;
+    }
+    box.innerHTML = hist.map((h) => {
+      const state = h.ok ? '<span class="pill on">elküldve</span>' : h.final ? '<span class="pill bad">sikertelen</span>' : `<span class="pill warn">újrapróbálja (${h.attempt}.)</span>`;
+      return `<div class="nh"><span class="nh-time">${dateTime(h.ts)}</span>
+        <span class="nh-tags"><span class="pill">${h.channel === 'email' ? 'Email' : 'SMS'}</span>${state}${h.test ? '<span class="pill">teszt</span>' : ''}</span>
+        <div class="nh-main">${esc(h.summary || '')}<div class="nh-detail">${esc(h.detail || '')}</div></div></div>`;
+    }).join('');
+  }
+
+  async _notifyTest(channel, root) {
+    const btn = $(`#nt-${channel}-test`);
+    const out = $(`#nt-${channel}-out`);
+    const gsm = channel === 'sms' && root.querySelector('[data-path="notifications.sms.provider"]').value === 'gsm';
+    btn.disabled = true;
+    out.innerHTML = `<div class="note" style="margin-top:12px">Küldés folyamatban…${gsm ? ' (GSM modemmel akár 30–60 mp)' : ''}</div>`;
+    try {
+      const r = await api('/api/notify/test', { method: 'POST', body: { channel, settings: collect(root).notifications } });
+      out.innerHTML = `<div class="note ok" style="margin-top:12px">✓ ${esc(r.message)}${channel === 'email' ? ' – nézd meg a levélszemét mappát is.' : ''}</div>`;
+    } catch (e) {
+      out.innerHTML = `<div class="errors-box">✗ ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      api('/api/notify', { quiet: true }).then((st) => this._renderNotifyHistory(st)).catch(() => {});
+    }
   }
 
   // ------------------------------------------------- kalibráció & GPIO

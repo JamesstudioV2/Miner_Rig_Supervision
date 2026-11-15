@@ -183,6 +183,8 @@ class ControllerTest(unittest.TestCase):
         self.run_for(1.2)
         self.assertEqual(self.c.state, CT.STOPPED)
         self.assertEqual(self.io.outputs, {"pump1": False, "pump2": False})
+        codes = self.events.codes()
+        self.assertEqual((codes.count("I601"), codes.count("I602")), (1, 1))  # notified manual start / stop
 
     def test_physical_buttons(self):
         self.c.restore()
@@ -390,6 +392,7 @@ class ControllerTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(self.c.state, CT.STOPPED)
         self.assertIsNone(self.c.alarm)
+        self.assertEqual(self.events.codes()[-1], "I603")
         ok, _ = self.c.acknowledge("teszt")
         self.assertFalse(ok)
 
@@ -400,6 +403,7 @@ class ControllerTest(unittest.TestCase):
         self.c = c2
         c2.restore()
         self.assertEqual(c2.state, CT.STARTING)
+        self.assertEqual(self.events.codes()[-1], "I605")  # automatic resume, not a manual start
 
     def test_no_auto_resume(self):
         self.store.update({"safety": {"auto_resume": False}})

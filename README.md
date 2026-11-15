@@ -12,6 +12,8 @@ a két vízkörös hűtőrendszert és a minereket:
 - **Biztonsági logika**: vészleállás hibakóddal, ha megáll (vagy el sem indul) a vízáramlás, ha egy figyelt
   hőmérő a beállított tartományon kívül kerül, opcionálisan szenzorhibánál; **utóhűtés**, ha leállítás után
   egy miner (vagy a víz) 60 °C fölé melegszik. A minerek saját hibái csak megjelennek – **nem állítják le a rendszert**.
+- **Automatikus értesítések emailben és SMS-ben** (saját GSM modem, Twilio vagy tetszőleges HTTP SMS átjáró):
+  KILLSWITCH, vészleállás és egyéb hibák, kézi indítás / leállítás, és ha egy miner **abbahagyja a termelést** – mindig hibakóddal.
 - **Adatnaplózás** napi fájlokba; ha a naplók összmérete meghaladja a **10 GB**-ot (állítható), a legrégebbi
   napló törlődik. **Grafikonok** fül választható időtartománnyal (1 óra … 1 év, egyéni, nagyítás egérrel), CSV export.
 - **Beállítások**: minerek hozzáadása (kézzel vagy hálózati kereséssel), védelmi határértékek és időzítések,
@@ -163,7 +165,9 @@ megmaradnak, a program újraindítása közben **a szivattyúk állapota nem vá
    gomb azonnal megmutatja, hogy a program eléri-e a minert, és jó-e a jelszó.
 3. **Beállítások › Védelmek**: állítsd be a hőmérő szenzorok tartományait (melyik legyen figyelve), az időzítéseket
    és az utóhűtést.
-4. Az **Áttekintés** oldalon az **INDÍTÁS** gombbal indítható a rendszer.
+4. **Beállítások › Értesítések**: add meg az email (SMTP) és/vagy az SMS adatait, és küldj egy tesztüzenetet
+   (lásd az 5. fejezetet).
+5. Az **Áttekintés** oldalon az **INDÍTÁS** gombbal indítható a rendszer.
 
 A program első indításkor **leállított** állapotban van (szivattyúk ki), és a felvett minereknek leállítási
 (alvó mód) parancsot küld – hiszen hűtés nélkül nem szabad dolgozniuk.
@@ -226,9 +230,77 @@ szivattyúkat** és visszaáll üzembe (kikapcsolható: „Automatikus visszaál
 A minerek által jelzett hibák (pl. ventilátor, hibás chip, nem termelő hashboard, pool hiba, elérhetetlenség)
 megjelennek a miner kártyáján, az ábrán (⚠) és a figyelmeztetések között – de **a rendszert nem állítják le**.
 
+### Termelésfigyelés
+Üzem közben a program minden engedélyezett minert figyel: ha egy miner, amelynek dolgoznia kellene, **nem termel**
+(nem érhető el, nem bányászik, vagy a hashrate a névleges érték 10 %-a alá esik), akkor 3 perc után **W406**
+(„abbahagyta a termelést”), indítás után pedig, ha 15 percen belül el sem kezdett termelni, **W407** hibakódot ad.
+Ha újra termel: **I606**. A szándékosan leállított minerre (leállított rendszer, kézi alvó mód) nem jelez.
+A rendszert ez sem állítja le – de értesítést küld (lásd lent). Az időket a Beállítások › Értesítések oldalon lehet módosítani.
+
 ---
 
-## 5. Támogatott minerek
+## 5. Értesítések – email és SMS
+
+Beállítás: **Beállítások › Értesítések**. A program magától küld üzenetet a következő eseményekről
+(eseményenként és csatornánként ki-/bekapcsolható):
+
+| Esemény | Kódok | Alapértelmezés |
+|---------|-------|----------------|
+| **KILLSWITCH** aktiválódott | E001, E002 | email + SMS, **azonnal** |
+| **Vészleállás** (áramlás, hőfok határérték, szenzorhiba) | E101–E214 | email + SMS, **azonnal** |
+| Kézi indítás / leállítás (web vagy fizikai gomb), vészleállás nyugtázása | I601–I603 | email + SMS |
+| **Miner abbahagyta a termelést** / indítás után nem kezdett el termelni / ismét termel | W406, W407, I606 | email + SMS |
+| Egyéb hiba (pl. a GPIO nem vezérelhető) | E301 | email + SMS |
+| Figyelmeztetések (miner hibát jelez / nem elérhető, hőfok- és szenzor figyelmeztetés…) | W2xx–W4xx | email |
+| A program újraindult (pl. áramszünet után), automatikus visszaállás üzembe | I604, I605 | email |
+
+- Minden üzenet tartalmazza a **hibakódot**, a leírást és az időpontot. Az email ezen felül a rendszer pillanatnyi
+  állapotát (hőfokok, szivattyúk, áramlás, minerenként a hashrate) és a webes felület címét is.
+- A KILLSWITCH és a vészleállás üzenete **azonnal** és korlát nélkül megy ki. A többi eseményt a program 10 mp-ig
+  gyűjti, és egy üzenetben küldi; ugyanazt a hibát 10 percen belül nem ismétli; óránként legfeljebb 60 email és 20 SMS
+  megy ki (mind állítható) – így egy „villogó” hiba nem okoz SMS áradatot.
+- Ha a küldés nem sikerül (pl. nincs internet), a program 30 mp, 1, 2, 5, 10, 30 és 60 perc múlva újrapróbálja.
+  A várakozó üzenetek lemezre kerülnek, **áramszünet után is kimennek**. A sikertelen küldés **W601**, a korlát elérése
+  **W602** eseményként látszik. A küldés külön szálon fut, egy lassú levelező szerver vagy modem sosem késlelteti a védelmeket.
+- A **„Teszt email/SMS küldése”** gomb a mezőkben lévő (még nem mentett) adatokkal küld; a hibát magyarul írja ki
+  (rossz jelszó, nem elérhető szerver, nem található modem…). Ugyanitt látszanak a legutóbbi küldések.
+- A jelszavak, tokenek, SIM PIN és az átjáró fejlécei soha nem kerülnek vissza a böngészőbe.
+
+### Email (SMTP)
+- **Gmail**: szerver `smtp.gmail.com`, port 587, STARTTLS. A Google fiókban kapcsold be a kétlépcsős azonosítást, és hozz
+  létre **alkalmazásjelszót** (Google fiók › Biztonság › Kétlépcsős azonosítás › Alkalmazásjelszavak) – a normál
+  jelszóval a Gmail nem enged belépni. Érdemes külön email fiókot nyitni a riasztásoknak.
+- Más szolgáltató / saját domain: az SMTP adatok a szolgáltatónál; 465-ös port → „SSL/TLS”, 587 → „STARTTLS”.
+  A Microsoft (Outlook/Hotmail/Microsoft 365) fiókok jelszavas SMTP belépést általában már nem engednek.
+
+### SMS
+Három módon küldhető:
+
+1. **GSM modem saját SIM kártyával** (ajánlott: internet nélkül is működik; a modemet és a Pi-t érdemes szünetmentes
+   tápra tenni, hogy áramszünetnél is menjen üzenet). Bármely AT parancsos modem jó (SIM800C/SIM800L, SIM7600, A7670…).
+   - **USB-s modem**: elég bedugni; a port általában `/dev/ttyUSB0` (SIM7600-nál az AT port gyakran `/dev/ttyUSB2`).
+     A megjelenő portok: `ls /dev/ttyUSB* /dev/ttyACM*`.
+   - **GPIO-ra kötött modul (UART)**: modul TX → GPIO15 / RXD (10. tű), modul RX → GPIO14 / TXD (8. tű), GND → GND.
+     A modul kapjon **külön, legalább 2 A-es tápot** (ne a Pi 3,3 V-járól), és 3,3 V-os jelszintet. Kapcsold ki a soros
+     konzolt: `sudo raspi-config` › Interface Options › Serial Port › login shell: **No**, serial hardware: **Yes**,
+     majd újraindítás. A port: `/dev/serial0`. Ilyenkor a GPIO14/15 lábat a program más funkcióra nem engedi kiosztani.
+   - A telepítő a szolgáltatás felhasználóját (`rigsup`) a `dialout` csoportba teszi, így hozzáfér a soros porthoz.
+   - A SIM kártyán a PIN kérést érdemes kikapcsolni (vagy megadni a PIN-t a beállításokban).
+   - A SIM800 csak 2G-s; ahol a 2G hálózatot lekapcsolták, 4G-s modem (pl. SIM7600, A7670) kell.
+   - Az SMS ékezet nélkül megy (GSM modemnél mindig), így egy üzenet 160 karakter lehet.
+2. **Twilio** (internetes szolgáltatás): Account SID, Auth token és a Twilio-s feladó szám a twilio.com konzolról.
+   A `06…` kezdetű számokat a program `+36…` formára alakítja.
+3. **HTTP SMS átjáró** – bármely SMS szolgáltató API-ja beköthető GET vagy POST kéréssel. Helyettesítők:
+   `{message}` az üzenet, `{to}` a telefonszám (`+36…`), `{to_plain}` a szám csak számjegyekkel, `{site}` a telephely neve.
+   Ha az URL-ben vagy a törzsben szerepel `{to}`, minden címzettnek külön kérés megy, különben egyetlen kérés (és nem kell
+   telefonszám). API kulcs a „Fejlécek” mezőbe írható (pl. `Authorization: Bearer …`). Példa – **Telegram bot**
+   (ingyenes, telefonra push üzenet):
+   `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>&text={message}` (GET; az ékezeteket itt nyugodtan
+   bekapcsolhatod).
+
+---
+
+## 6. Támogatott minerek
 
 | Típus a beállításokban | Olvasás | Leállítás / indítás |
 |------------------------|---------|----------------------|
@@ -249,7 +321,7 @@ Megjegyzések:
 
 ---
 
-## 6. Hibakódok
+## 7. Hibakódok
 
 | Kód | Jelentés | Következmény |
 |-----|----------|--------------|
@@ -273,14 +345,23 @@ Megjegyzések:
 | W403 | Miner parancs sikertelen | csak jelzés |
 | W404 | Miner nem vezérelhető (csak olvasható típus) | csak jelzés |
 | W405 | Szimulált miner maradt a listában valódi hardver módban | csak jelzés |
+| **W406** | **Miner abbahagyta a termelést** (nem elérhető / nem bányászik / túl kicsi a hashrate) | csak jelzés + értesítés |
+| W407 | Miner az indítás után nem kezdett el termelni | csak jelzés + értesítés |
+| W601 | Értesítés küldése sikertelen (a program újrapróbálja) | figyelmeztetés |
+| W602 | Értesítések óránkénti korlátja elérve | figyelmeztetés |
 | I501 | Utóhűtés aktív | tájékoztatás |
 | I502 | Kézi szivattyú üzem (légtelenítés) | tájékoztatás |
+| I601 / I602 | Rendszer elindítva / leállítva (kézi indítás / leállítás) | tájékoztatás + értesítés |
+| I603 | Vészleállás nyugtázva | tájékoztatás + értesítés |
+| I604 | A program elindult (újraindulás, áramszünet után) | tájékoztatás + értesítés |
+| I605 | Automatikus visszaállás üzembe újraindulás után | tájékoztatás + értesítés |
+| I606 | A miner ismét termel | tájékoztatás + értesítés |
 
 A teljes lista az **Események** fülön, a „Hibakódok jegyzéke” részben is megtalálható.
 
 ---
 
-## 7. Adatnaplózás
+## 8. Adatnaplózás
 
 - Mintavétel 10 mp-enként (állítható), napi SQLite fájlokba: `/var/lib/rig-supervisor/logs/ÉÉÉÉ-HH-NN.sqlite`.
 - Hosszabb időszakokhoz a program 5 perces átlagokat is tárol, így az 1 éves grafikon is gyors.
@@ -294,7 +375,7 @@ legyen NTP elérés, vagy szerelj be RTC modult.
 
 ---
 
-## 8. Biztonság
+## 9. Biztonság
 
 - A webes felület alapból jelszó nélkül érhető el a helyi hálózaton. A **Beállítások › Rendszer** oldalon
   bekapcsolható a jelszavas védelem. Elfelejtett jelszó: `sudo rig-supervisor-reset-password`.
@@ -302,7 +383,7 @@ legyen NTP elérés, vagy szerelj be RTC modult.
 
 ---
 
-## 9. Hardver mód és hibaelhárítás – „a GPIO lábak nem változnak"
+## 10. Hardver mód és hibaelhárítás – „a GPIO lábak nem változnak"
 
 A program kétféle módban futhat, és ezt **a webes felület dönti el**
 (**Beállítások › Kalibráció & GPIO › Hardver mód**, ugyanez a Rendszer fülön is):
@@ -348,7 +429,7 @@ cd /opt/rig-supervisor && sudo -u rigsup python3 -m rig_supervisor --diagnose --
    elvégzi, és a végén ki is írja ennek a diagnosztikának az eredményét.
 5. **Aktív szint:** ha a láb változik, de az SSR fordítva kapcsol, állítsd át az „Aktív szint (negálás)" oszlopot.
 
-## 10. Kipróbálás valódi hardver nélkül (szimuláció)
+## 11. Kipróbálás valódi hardver nélkül (szimuláció)
 
 Bármilyen gépen (Windows, Linux, Mac – Python 3.7+):
 
@@ -358,8 +439,8 @@ python3 -m rig_supervisor --sim --data ./data
 
 Majd böngészőben: `http://localhost:8080/`. A szimulátor egy egyszerű hőtani modellel szimulálja a két vízkört,
 4 minert, az áramláskapcsolókat és a hőmérőket. A **Beállítások › Rendszer › Szimuláció** részben hibák
-idézhetők elő (áramlás kimaradás, szenzor szakadás/rövidzár, le nem álló miner, fizikai gombnyomás), így minden
-védelmi funkció veszélytelenül kipróbálható. Nem Raspberry Pi-n a program automatikusan szimulációs módban indul.
+idézhetők elő (áramlás kimaradás, szenzor szakadás/rövidzár, le nem álló vagy elérhetetlen miner, fizikai gombnyomás,
+KILLSWITCH), így minden védelmi funkció – és az értesítések is – veszélytelenül kipróbálható. Nem Raspberry Pi-n a program automatikusan szimulációs módban indul.
 
 **Figyelem:** a `--sim` kapcsolót a Raspberry Pi-n ne használd éles üzemhez – szimulációban a program nem
 vezérli a GPIO lábakat. Ha mégis így indult, a fejléc sárga sávján a „Váltás valódi hardverre" gombbal
@@ -373,7 +454,7 @@ python3 -m unittest discover -s tests -t .
 
 ---
 
-## 11. Felépítés
+## 12. Felépítés
 
 ```
 rig_supervisor/
@@ -382,6 +463,7 @@ rig_supervisor/
   miners/            LAN kommunikáció (CGMiner API, HTTP digest), firmware meghajtók, lekérdezés, hálózati keresés
   datalog.py         napi SQLite naplók, 10 GB-os korlát, grafikon lekérdezések
   events.py          eseménynapló
+  notify.py          értesítések: email (SMTP), SMS (GSM modem / Twilio / HTTP átjáró), összevonás, korlátok, újrapróbálás
   config.py          beállítások, ellenőrzés, mentés (config.json + .bak)
   web/server.py      beépített webszerver: JSON API + élő adatfolyam (Server-Sent Events)
   web/static/        a webes felület (HTML/CSS/JS, külső függőség nélkül)

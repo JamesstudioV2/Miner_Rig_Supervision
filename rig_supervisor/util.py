@@ -80,6 +80,21 @@ def clamp(value, lo, hi):
     return lo if value < lo else hi if value > hi else value
 
 
+def fmt_num(value, digits: int = 1) -> str:
+    """Hungarian number format (decimal comma)."""
+    return ("%.*f" % (digits, value)).replace(".", ",")
+
+
+def fmt_hashrate(hs) -> str:
+    if hs is None:
+        return "—"
+    for div, unit in ((1e18, "EH/s"), (1e15, "PH/s"), (1e12, "TH/s"), (1e9, "GH/s"), (1e6, "MH/s"), (1e3, "kH/s")):
+        if abs(hs) >= div:
+            v = hs / div
+            return "%s %s" % (fmt_num(v, 1 if v >= 100 else 2), unit)
+    return "%s TH/s" % fmt_num(0, 0) if not hs else "%d H/s" % hs
+
+
 def fmt_duration(seconds: float) -> str:
     seconds = int(max(0, seconds))
     if seconds < 60:

@@ -126,6 +126,10 @@ _DEFAULTS = {
     "miners": {
         "poll_interval_s": 10.0,
         "timeout_s": 4.0,
+        # termelés figyelése (W406 / W407): csak akkor, ha a minernek dolgoznia kellene
+        "production_loss_delay_s": 180.0,     # ennyi ideig tartó kiesés után "abbahagyta a termelést"
+        "production_start_timeout_s": 900.0,  # indítás után ennyi időn belül el kell kezdenie termelni
+        "production_min_pct": 10.0,           # a névleges hashrate ennyi %-a alatt nem számít termelésnek
         "list": [],
     },
     "logging": {
@@ -133,7 +137,86 @@ _DEFAULTS = {
         "max_size_gb": 10.0,
         "min_free_mb": 500.0,
     },
+    "notifications": {
+        "enabled": True,
+        "site_url": "",          # a levelekben szereplő link (üresen: automatikus)
+        "batch_s": 10.0,         # ennyi ideig gyűjti az eseményeket egy üzenetbe (kritikusak azonnal)
+        "notify_recovery": True,  # "miner ismét termel" értesítés
+        "email": {
+            "enabled": False,
+            "smtp_host": "",
+            "smtp_port": 587,
+            "security": "starttls",   # starttls | ssl | none
+            "username": "",
+            "password": "",
+            "sender": "",
+            "recipients": "",
+            "max_per_hour": 60,
+        },
+        "sms": {
+            "enabled": False,
+            "provider": "gsm",        # gsm (soros GSM modem, AT parancsok) | twilio | http
+            "recipients": "",
+            "ascii": True,            # ékezetek nélkül (olcsóbb, minden telefon jól mutatja)
+            "max_per_hour": 20,
+            "gsm_port": "/dev/ttyUSB0",
+            "gsm_baud": 115200,
+            "gsm_pin": "",
+            "twilio_sid": "",
+            "twilio_token": "",
+            "twilio_from": "",
+            "http_method": "GET",
+            "http_url": "",
+            "http_body": "",
+            "http_content_type": "application/json",
+            "http_headers": "",
+        },
+        "rules": {
+            "killswitch": {"email": True, "sms": True},
+            "emergency": {"email": True, "sms": True},
+            "manual": {"email": True, "sms": True},
+            "miner_production": {"email": True, "sms": True},
+            "errors": {"email": True, "sms": True},
+            "warnings": {"email": True, "sms": False},
+            "restart": {"email": True, "sms": False},
+        },
+    },
 }
+
+NOTIFY_CATEGORIES = ("killswitch", "emergency", "manual", "miner_production", "errors", "warnings", "restart")
+# secret fields: never sent to the browser, an empty (null) value on save keeps the stored one
+NOTIFY_SECRETS = (("email", "password"), ("sms", "twilio_token"), ("sms", "http_headers"), ("sms", "gsm_pin"))
+UART_DEVICES = ("/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0")
+GSM_BAUDS = (9600, 19200, 38400, 57600, 115200)
+_EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
+_PHONE_RE = re.compile(r"^\+?[0-9]{6,15}$")
+
+
+def split_emails(text) -> list:
+    return [x.strip() for x in re.split(r"[,;\s]+", str(text or "")) if x.strip()]
+
+
+def split_phones(text) -> list:
+    return [re.sub(r"[\s\-()/.]", "", x) for x in re.split(r"[,;\n]+", str(text or "")) if x.strip()]
+
+
+def http_needs_recipient(sms: dict) -> bool:
+    """An HTTP gateway URL / body without {to} (e.g. a Telegram bot) sends one request with no phone number."""
+    return re.search(r"\{to(_plain)?\}", (sms.get("http_url") or "") + (sms.get("http_body") or "")) is not None
+
+
+def uart_pins(cfg: dict) -> dict:
+    """GPIO14/15 are needed when the GSM modem is wired to the Pi's own UART."""
+    sms = cfg.get("notifications", {}).get("sms", {})
+    if sms.get("enabled") and sms.get("provider") == "gsm" and sms.get("gsm_port") in UART_DEVICES:
+        return {14: "UART TXD (GSM modem)", 15: "UART RXD (GSM modem)"}
+    return {}
+
+
+def reserved_pins(cfg: dict) -> dict:
+    pins = dict(bus_pins(cfg["hardware"]["adc"]))
+    pins.update(uart_pins(cfg))
+    return pins
 
 _SENSOR_DEFAULTS = {
     "r25": 10000.0,
@@ -315,6 +398,10 @@ def validate(cfg: dict):
         if gpio in used:
             v.err("A GPIO%d az ADC buszhoz kell (%s), nem használható ehhez: %s"
                   % (gpio, what, IO_LABELS[used[gpio]]))
+    for gpio, what in uart_pins(cfg).items():
+        if gpio in used:
+            v.err("A GPIO%d a GSM modem soros portjához kell (%s), nem használható ehhez: %s"
+                  % (gpio, what, IO_LABELS[used[gpio]]))
 
     channels = ADC_TYPES.get(adc.get("type"), {"channels": 8})["channels"]
     used_ch = {}
@@ -362,6 +449,9 @@ def validate(cfg: dict):
     mn = cfg["miners"]
     v.number(mn, "poll_interval_s", 2, 300, "Miner lekérdezési időköz")
     v.number(mn, "timeout_s", 1, 30, "Miner kommunikációs időkorlát")
+    v.number(mn, "production_loss_delay_s", 10, 7200, "Termelés kiesés tűrése")
+    v.number(mn, "production_start_timeout_s", 60, 7200, "Termelés megindulásának időkorlátja")
+    v.number(mn, "production_min_pct", 0, 95, "Termelés alsó határa")
     if not isinstance(mn.get("list"), list):
         v.err("Miner lista: érvénytelen formátum")
         mn["list"] = []
@@ -406,7 +496,102 @@ def validate(cfg: dict):
     v.number(lg, "max_size_gb", 0.05, 2000, "Napló maximális mérete")
     v.number(lg, "min_free_mb", 0, 100000, "Minimális szabad hely")
 
+    _validate_notifications(cfg["notifications"], v)
     return cfg, v.errors
+
+
+def _secret(d: dict, key: str) -> None:
+    value = d.get(key)
+    d[key] = "" if value is None else str(value)
+
+
+def _validate_notifications(nt: dict, v: "_Validator") -> None:
+    v.boolean(nt, "enabled", "Értesítések")
+    v.text(nt, "site_url", "Felület címe az értesítésekben", max_len=200)
+    if nt["site_url"] and not re.match(r"^https?://", nt["site_url"]):
+        v.err("Felület címe: http:// vagy https:// kezdetű cím kell")
+    v.number(nt, "batch_s", 0, 300, "Események összevonása")
+    v.boolean(nt, "notify_recovery", "Értesítés helyreálláskor")
+
+    em = nt["email"]
+    v.boolean(em, "enabled", "Email értesítés")
+    v.text(em, "smtp_host", "SMTP szerver", max_len=253)
+    v.number(em, "smtp_port", 1, 65535, "SMTP port", integer=True)
+    v.choice(em, "security", ("starttls", "ssl", "none"), "SMTP titkosítás")
+    v.text(em, "username", "SMTP felhasználónév", max_len=200)
+    _secret(em, "password")
+    v.text(em, "sender", "Feladó címe", max_len=200)
+    v.text(em, "recipients", "Email címzettek", max_len=1000)
+    v.number(em, "max_per_hour", 1, 1000, "Email óránkénti korlát", integer=True)
+    for addr in split_emails(em["recipients"]):
+        if not _EMAIL_RE.match(addr):
+            v.err("Érvénytelen email cím: %s" % addr)
+    if em["sender"] and not _EMAIL_RE.match(em["sender"]):
+        v.err("Érvénytelen feladó cím: %s" % em["sender"])
+    if em["enabled"]:
+        if not em["smtp_host"]:
+            v.err("Email értesítéshez add meg az SMTP szervert")
+        if not split_emails(em["recipients"]):
+            v.err("Email értesítéshez adj meg legalább egy címzettet")
+        if not em["sender"] and not _EMAIL_RE.match(em["username"]):
+            v.err("Email értesítéshez add meg a feladó címét")
+
+    sm = nt["sms"]
+    v.boolean(sm, "enabled", "SMS értesítés")
+    v.choice(sm, "provider", ("gsm", "twilio", "http"), "SMS szolgáltató")
+    v.text(sm, "recipients", "SMS címzettek", max_len=1000)
+    v.boolean(sm, "ascii", "SMS ékezetek nélkül")
+    v.number(sm, "max_per_hour", 1, 500, "SMS óránkénti korlát", integer=True)
+    v.text(sm, "gsm_port", "GSM modem soros port", max_len=100)
+    v.number(sm, "gsm_baud", 1200, 921600, "GSM modem sebesség", integer=True)
+    if isinstance(sm.get("gsm_baud"), int) and sm["gsm_baud"] not in GSM_BAUDS:
+        v.err("GSM modem sebesség: %s" % ", ".join(str(b) for b in GSM_BAUDS))
+    _secret(sm, "gsm_pin")
+    if sm["gsm_pin"] and not re.match(r"^[0-9]{4,8}$", sm["gsm_pin"]):
+        v.err("SIM PIN: 4–8 számjegy")
+    v.text(sm, "twilio_sid", "Twilio Account SID", max_len=64)
+    _secret(sm, "twilio_token")
+    v.text(sm, "twilio_from", "Twilio feladó szám", max_len=32)
+    v.choice(sm, "http_method", ("GET", "POST"), "HTTP metódus")
+    v.text(sm, "http_url", "HTTP átjáró URL", max_len=1000)
+    if not isinstance(sm.get("http_body"), str):
+        sm["http_body"] = ""
+    v.choice(sm, "http_content_type", ("application/json", "application/x-www-form-urlencoded", "text/plain"),
+             "HTTP tartalom típus")
+    _secret(sm, "http_headers")
+    for line in sm["http_headers"].splitlines():
+        if line.strip() and ":" not in line:
+            v.err("HTTP fejléc: 'Név: érték' formátum kell (%s)" % line.strip()[:40])
+    for number in split_phones(sm["recipients"]):
+        if not _PHONE_RE.match(number):
+            v.err("Érvénytelen telefonszám: %s (formátum: +36301234567)" % number)
+    if sm["enabled"]:
+        if not split_phones(sm["recipients"]) and not (sm["provider"] == "http" and not http_needs_recipient(sm)):
+            v.err("SMS értesítéshez adj meg legalább egy telefonszámot")
+        if sm["provider"] == "gsm" and not sm["gsm_port"].startswith("/dev/"):
+            v.err("GSM modem: a soros port egy /dev/... eszköz (pl. /dev/ttyUSB0 vagy /dev/serial0)")
+        if sm["provider"] == "twilio":
+            if not sm["twilio_sid"].startswith("AC") or not sm["twilio_token"] or not sm["twilio_from"]:
+                v.err("Twilio: add meg az Account SID-et (AC…), a tokent és a feladó számot")
+        if sm["provider"] == "http":
+            if not re.match(r"^https?://", sm["http_url"]):
+                v.err("HTTP átjáró: az URL http:// vagy https:// kezdetű legyen")
+            elif "{message}" not in sm["http_url"] and "{message}" not in sm["http_body"]:
+                v.err("HTTP átjáró: az URL-ben vagy a törzsben szerepelnie kell a {message} helyettesítőnek")
+
+    rules = nt.get("rules")
+    if not isinstance(rules, dict):
+        rules = nt["rules"] = {}
+    for cat in NOTIFY_CATEGORIES:
+        rule = rules.get(cat)
+        if not isinstance(rule, dict):
+            rule = rules[cat] = {"email": False, "sms": False}
+        for ch in ("email", "sms"):
+            rule.setdefault(ch, False)
+            v.boolean(rule, ch, "Értesítési szabály (%s / %s)" % (cat, ch))
+    for key in list(rules):
+        if key not in NOTIFY_CATEGORIES:
+            del rules[key]
 
 
 def _migrate(cfg: dict, raw: dict) -> dict:

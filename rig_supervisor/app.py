@@ -16,7 +16,9 @@ from .hardware.gpio import pi_model
 from .hardware.io import IOManager
 from .hardware.sim import SimWorld
 from .miners.manager import MinerManager
-from .util import ChangeSignal
+from .miners.scanner import local_ipv4
+from .notify import Notifier
+from .util import ChangeSignal, fmt_hashrate, fmt_num
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,9 @@ class App:
         self.controller = Controller(self.config, self.io, self.miners, self.events, self.signal,
                                      os.path.join(data_dir, "state.json"))
         self.datalog = DataLogger(os.path.join(data_dir, "logs"), self.config, self.log_snapshot, self.events)
+        # registered as an event listener right away: the start-up events are notified too
+        self.notifier = Notifier(self.config, self.events, data_dir, status_fn=self.notify_status,
+                                 url_fn=self.ui_url, site_fn=self.notify_site)
         self.port = int(port if port is not None else self.config.data["web"]["port"])
         self.web = None
         self.stopping = False
@@ -127,11 +132,12 @@ class App:
         # the web port is bound first: a port conflict must not leave a half started controller behind
         self.web = WebServer(self, host, self.port)
         self.port = self.web.port
+        self.notifier.start()
         self.io.start(self.controller.initial_outputs())
         hw = self.io.status()
         self.events.add("info", "Program indítása (v%s) – hardver mód: %s (%s)" % (
             __version__, "SZIMULÁCIÓ" if self.simulated else "valódi hardver, GPIO: %s" % hw["gpio_backend"],
-            self.mode_reason), source="rendszer")
+            self.mode_reason), code="I604", source="rendszer")
         if self.sim is not None:
             self.sim.start()
         self.miners.start()
@@ -153,7 +159,58 @@ class App:
         if self.sim is not None:
             self.sim.stop()
         self.io.stop()
+        self.notifier.stop()
         self.events.close()
+
+    # ---------------------------------------------------------- notifications
+    def notify_site(self) -> str:
+        name = self.config.data["site_name"] or "Rig Supervisor"
+        return name + (" – SZIMULÁCIÓ" if self.simulated else "")
+
+    def ui_url(self) -> str:
+        ip = local_ipv4()
+        return "http://%s:%d/" % (ip, self.port) if ip else ""
+
+    def notify_status(self) -> list:
+        """Short status summary appended to the notification emails."""
+        snap = self.controller.snapshot()
+        sysd = snap["system"]
+        alarm = sysd.get("alarm")
+        lines = ["Rendszer: %s%s" % (sysd["label"], (" – %s %s" % (alarm["code"], alarm.get("title", ""))) if alarm
+                                     else "")]
+        temps = []
+        for sid in ("t1", "t2", "t3", "t4"):
+            t = snap["temps"][sid]
+            value = "hiba" if t["fault"] else ("%s °C" % fmt_num(t["value"], 1) if t["value"] is not None else "—")
+            temps.append("%s (%s) %s" % (sid.upper(), t["short"], value))
+        lines.append("Vízhőmérséklet: " + ", ".join(temps))
+        pumps = ", ".join("%s %s" % (k, "BE" if snap["pumps"][p]["on"] else "KI")
+                          for k, p in (("P1", "pump1"), ("P2", "pump2")))
+        flows = ", ".join("%s %s" % (k, {"ok": "áramlik", "idle": "áll", "disabled": "nem figyelt"}.get(
+            snap["flows"][f]["status"], "NINCS ÁRAMLÁS")) for k, f in (("F1", "flow1"), ("F2", "flow2")))
+        lines.append("Szivattyúk: %s · Áramlás: %s" % (pumps, flows))
+        miners = self.miners.snapshot()
+        summ = self.miners.summary(miners)
+        lines.append("Minerek: %d/%d elérhető, %d bányászik, összesen %s" % (
+            summ["online"], summ["total"], summ["mining"], fmt_hashrate(summ["hashrate"])))
+        labels = {"mining": "bányászik", "starting": "indul", "restarting": "újraindul", "sleeping": "alvó mód",
+                  "idle": "tétlen", "offline": "NEM ELÉRHETŐ", "connecting": "kapcsolódás", "disabled": "kikapcsolva"}
+        for m in [m for m in miners if m["enabled"]][:40]:
+            d = m["data"] if m["online"] else None
+            parts = [labels.get(m["status"], m["status"])]
+            # the snapshot is taken right after a stop / start command: show that it is on its way
+            if m["desired"] is False and m["status"] in ("mining", "starting", "restarting"):
+                parts[0] += " → leállítás folyamatban"
+            elif m["desired"] is True and m["status"] in ("sleeping", "idle"):
+                parts[0] += " → indítás folyamatban"
+            if d:
+                parts.append(fmt_hashrate(d.get("hashrate") or 0))
+                if d.get("temp_chip") is not None:
+                    parts.append("chip %s °C" % fmt_num(d["temp_chip"], 0))
+            if m.get("prod_alarm"):
+                parts.append(m["prod_alarm"]["code"])
+            lines.append("  - %s: %s" % (m["name"], ", ".join(parts)))
+        return lines
 
     # ------------------------------------------------------------------ views
     def live_state(self) -> dict:
