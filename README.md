@@ -356,7 +356,9 @@ Megjegyzések:
 | W301 | ADC nem elérhető | figyelmeztetés |
 | W303 | Áramlásfigyelés kikapcsolva | figyelmeztetés |
 | W304 | Beragadt / rosszul bekötött nyomógomb | figyelmeztetés |
-| W305 | GPIO kimenet: a lábról visszaolvasott szint eltér a kiadottól (rövidzár, túlterhelés, hibás bekötés) | figyelmeztetés |
+| W305 | GPIO kimenet: a lábról visszaolvasott szint eltér a kiadottól (rövidzár, túlterhelés, hibás bekötés, más is vezérli) | figyelmeztetés |
+| W306 | GPIO láb ütközés: a lábat a rendszer (SPI/I²C/UART…) vagy egy másik program is használja | figyelmeztetés |
+| W307 | Ugráló bemenet (lebegő láb, zaj, laza érintkezés) | figyelmeztetés |
 | W401 | Miner nem elérhető | csak jelzés |
 | W402 | Miner hibát jelez | csak jelzés |
 | W403 | Miner parancs sikertelen | csak jelzés |
@@ -446,6 +448,36 @@ cd /opt/rig-supervisor && sudo -u rigsup python3 -m rig_supervisor --diagnose --
    felhasználónak a `gpio` (és `spi`, `i2c`) csoportban kell lennie – a telepítő (`sudo ./install.sh`) ezt
    elvégzi, és a végén ki is írja ennek a diagnosztikának az eredményét.
 5. **Aktív szint:** ha a láb változik, de az SSR fordítva kapcsol, állítsd át az „Aktív szint (negálás)" oszlopot.
+
+### „A kimenetek ugrálnak" – két vezérlés egyszerre
+- **Csak egy példány futhat.** Ha a szolgáltatás mellett kézzel is elindítod a programot (`python3 -m rig_supervisor …`),
+  vagy egy régi telepítés is fut, a két példány ugyanazokat a lábakat írná, és a szivattyú kimenetek néhány
+  másodpercenként átbillennének (a régi RPi.GPIO könyvtár ezt nem akadályozza meg). A program ezért induláskor
+  ellenőrzi, fut-e már másik példány: ha igen, **el sem indul**, és kiírja a másik folyamat azonosítóját (PID).
+  A futó példányokat a `--diagnose` és a Kalibráció oldal „Hardver diagnosztika” része is listázza.
+- **Ütköző láb (W306):** ha egy kimenetet vagy bemenetet a rendszer más funkcióra is használ (SPI, I²C, soros konzol,
+  1-Wire, PWM), vagy egy másik program (pl. régi szkript a `/sys/class/gpio`-n keresztül) is vezérli, a Kalibráció oldalon
+  piros „ÜTKÖZÉS” jelzés jelenik meg – ilyenkor válassz másik GPIO-t.
+- **Más is írja a lábat (W305):** ha a lábról visszaolvasott szint időnként eltér attól, amit a program kiad, egy
+  másik program vagy eszköz is vezérli. A kimenetek minden váltása a rendszernaplóba is bekerül:
+  `journalctl -u rig-supervisor -f`.
+- **Ugráló bemenet (W307):** ha egy bemenet percenként sokszor vált, a láb lebeg (hiányzó fel-/lehúzó ellenállás),
+  zajos a vezeték, vagy laza az érintkezés.
+- **5 V-os relé-/SSR modul:** sok modul („alacsony szintre aktív”, 5 V-ról táplált) a Pi 3,3 V-os magas szintjét nem
+  érzékeli kikapcsolásnak – a láb jól vált, de a modul nem. Ilyenkor tranzisztoros illesztő vagy 3,3 V-os modul kell.
+
+**Lábankénti teszt** – a szolgáltatás leállítása után minden kimenetet kétszer be- és kikapcsol, közben folyamatosan
+visszaolvassa, majd 10 mp-ig figyeli a bemeneteket (közben nyomd meg a gombokat):
+
+```bash
+sudo systemctl stop rig-supervisor
+```
+```bash
+cd /opt/rig-supervisor && sudo -u rigsup python3 -m rig_supervisor --gpio-test --data /var/lib/rig-supervisor
+```
+```bash
+sudo systemctl start rig-supervisor
+```
 
 ## 11. Kipróbálás valódi hardver nélkül (szimuláció)
 

@@ -446,8 +446,9 @@ class Controller:
     def _status_warnings(self, cfg: dict) -> None:
         hw = self.io.status()
         if not hw["gpio_ok"]:
-            parts = ["%s – %s" % (label, err) for label, err in hw["pin_errors"].items()
-                     if err != "nincs használható GPIO könyvtár"] + hw["gpio_errors"]
+            parts = [] if hw.get("owner_blocked") else ["%s – %s" % (label, err) for label, err in hw["pin_errors"].items()
+                                                        if err != "nincs használható GPIO könyvtár"]
+            parts += hw["gpio_errors"]
             detail = "; ".join(dict.fromkeys(parts)) or "ismeretlen hiba"
             self._warn("hw:gpio", "E301", "GPIO hiba – a szivattyúk nem vezérelhetők: %s" % detail, "error")
         else:
@@ -466,6 +467,29 @@ class Controller:
                                             m["label"], m["gpio"], "magas (3,3 V)" if m["expected"] else "alacsony (0 V)",
                                             "magas" if m["actual"] else "alacsony"), "warning")
             else:
+                self._clear_warn(key)
+            key = "flapping:" + name
+            f = (hw.get("output_flapping") or {}).get(name)
+            if f:
+                self._warn(key, "W305", "%s (GPIO%d): a láb szintje az utolsó percben %d alkalommal eltért attól, amit a "
+                                        "program kiad – valószínűleg egy MÁSIK program vagy eszköz is vezérli ezt a lábat "
+                                        "(pl. egy második Rig Supervisor példány vagy egy régi szkript)" % (
+                                            f["label"], f["gpio"], f["count"]), "warning")
+            else:
+                self._clear_warn(key)
+        for name, f in (hw.get("input_flapping") or {}).items():
+            self._warn("inflap:" + name, "W307", "%s (GPIO%d) bemenet ugrál: %d váltás az utolsó percben – lebegő "
+                                                 "bemenet (hiányzó fel-/lehúzó ellenállás), zaj a vezetéken vagy "
+                                                 "laza érintkezés" % (f["label"], f["gpio"], f["count"]), "warning")
+        for key in [k for k in list(self._warnings) if k.startswith("inflap:")]:
+            if key[7:] not in (hw.get("input_flapping") or {}):
+                self._clear_warn(key)
+        warned = hw.get("pin_warnings") or {}
+        for label, text in warned.items():
+            self._warn("pinconf:" + label, "W306", "%s: %s – a láb két helyről kaphat vezérlést, válassz másik GPIO-t "
+                                                   "(Beállítások › Kalibráció & GPIO)" % (label, text), "warning")
+        for key in [k for k in list(self._warnings) if k.startswith("pinconf:")]:
+            if key[8:] not in warned:
                 self._clear_warn(key)
         for loop in (1, 2):
             key = "flowdis:%d" % loop

@@ -50,8 +50,35 @@ def is_raspberry_pi() -> bool:
     return bool(pi_model())
 
 
+def sysfs_exported(pin: int) -> bool:
+    """True when another program exported the pin through /sys/class/gpio (old style scripts)."""
+    bases = []
+    try:
+        for chip in os.listdir("/sys/class/gpio"):
+            if not chip.startswith("gpiochip"):
+                continue
+            try:
+                with open("/sys/class/gpio/%s/label" % chip) as f:
+                    label = f.read().strip()
+                with open("/sys/class/gpio/%s/base" % chip) as f:
+                    base = int(f.read().strip())
+            except (OSError, ValueError):
+                continue
+            if "bcm2835" in label or "bcm2711" in label or label.startswith("pinctrl"):
+                bases.append(base)
+    except OSError:
+        return False
+    return any(os.path.exists("/sys/class/gpio/gpio%d" % (base + pin)) for base in bases or [0])
+
+
 class GPIOBackend:
     name = "base"
+
+    def conflict(self, pin: int):
+        """Who else uses the pin (kernel function, other program) - checked BEFORE setting it up."""
+        if sysfs_exported(pin):
+            return "egy másik program is használja (exportálva: /sys/class/gpio)"
+        return None
 
     def setup_output(self, pin: int, level: bool) -> None:
         raise NotImplementedError
@@ -86,6 +113,21 @@ class RPiGPIOBackend(GPIOBackend):
         GPIO.gpio_function(4)
         self.version = str(getattr(GPIO, "VERSION", "?"))
 
+    def conflict(self, pin):
+        other = super().conflict(pin)
+        if other:
+            return other
+        try:
+            func = self.G.gpio_function(pin)
+        except Exception:  # noqa: BLE001
+            return None
+        names = {getattr(self.G, k, object()): v for k, v in (
+            ("SPI", "SPI busz"), ("I2C", "I²C busz"), ("SERIAL", "soros port (UART / konzol)"),
+            ("HARD_PWM", "PWM (pl. hang)"), ("UNKNOWN", "ismeretlen alternatív funkció"))}
+        if func in names:
+            return "a rendszer %s funkcióra használja" % names[func]
+        return None
+
     def setup_output(self, pin, level):
         self.G.setup(pin, self.G.OUT, initial=self.G.HIGH if level else self.G.LOW)
 
@@ -111,6 +153,7 @@ class LGPIOBackend(GPIOBackend):
 
         self.lg = lgpio
         self.handle = lgpio.gpiochip_open(chip)
+        self._claimed = set()
         self.version = str(getattr(lgpio, "LGPIO_PY_VERSION", "?"))
 
     def close(self):
@@ -119,7 +162,20 @@ class LGPIOBackend(GPIOBackend):
         except Exception:  # noqa: BLE001
             pass
 
+    def conflict(self, pin):
+        other = super().conflict(pin)
+        if other:
+            return other
+        try:
+            mode = self.lg.gpio_get_mode(self.handle, pin)
+        except Exception:  # noqa: BLE001
+            return None
+        if mode >= 0 and mode & 1 and pin not in self._claimed:  # bit 0: in use by the kernel / another program
+            return "a kernel vagy egy másik program foglalja (pl. SPI/I²C/UART/1-Wire overlay)"
+        return None
+
     def setup_output(self, pin, level):
+        self._claimed.add(pin)
         try:
             self.lg.gpio_free(self.handle, pin)
         except Exception:  # noqa: BLE001 - not claimed yet
@@ -130,6 +186,7 @@ class LGPIOBackend(GPIOBackend):
         self.lg.gpio_write(self.handle, pin, 1 if level else 0)
 
     def setup_input(self, pin, pull):
+        self._claimed.add(pin)
         try:
             self.lg.gpio_free(self.handle, pin)
         except Exception:  # noqa: BLE001
@@ -141,6 +198,7 @@ class LGPIOBackend(GPIOBackend):
         return bool(self.lg.gpio_read(self.handle, pin))
 
     def release(self, pin):
+        self._claimed.discard(pin)
         self.lg.gpio_free(self.handle, pin)
 
 
@@ -148,6 +206,9 @@ class SimGPIOBackend(GPIOBackend):
     """In-memory GPIO used by the simulator and the tests."""
 
     name = "szimulált"
+
+    def conflict(self, pin):
+        return None
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -210,6 +271,9 @@ class NullGPIOBackend(GPIOBackend):
     def __init__(self, reason: str):
         self.reason = reason
 
+    def conflict(self, pin):
+        return None
+
     def _fail(self, *_args, **_kwargs):
         raise RuntimeError("GPIO nem elérhető: %s" % self.reason)
 
@@ -257,5 +321,7 @@ def diagnostics() -> dict:
         user = pwd.getpwuid(os.geteuid()).pw_name
     except Exception:  # noqa: BLE001
         user = str(os.geteuid()) if hasattr(os, "geteuid") else ""
+    from . import owner
+
     return {"model": pi_model(), "user": user, "groups": groups, "devices": devices, "libs": libs,
-            "python": sys.version.split()[0]}
+            "python": sys.version.split()[0], "instances": owner.other_instances()}

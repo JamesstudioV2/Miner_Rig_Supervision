@@ -13,6 +13,7 @@ from .controller import Controller
 from .datalog import DataLogger
 from .events import EventStore
 from .hardware.gpio import pi_model
+from .hardware import owner
 from .hardware.io import IOManager
 from .hardware.sim import SimWorld
 from .camera import Camera
@@ -22,6 +23,10 @@ from .notify import Notifier
 from .util import ChangeSignal, fmt_hashrate, fmt_num
 
 log = logging.getLogger(__name__)
+
+
+class AlreadyRunning(RuntimeError):
+    """Another copy of the program already drives the GPIO pins."""
 
 
 def _demo_miners() -> list:
@@ -133,8 +138,23 @@ class App:
     def start(self, host: str = "0.0.0.0") -> None:
         from .web.server import WebServer
 
+        # only one copy may drive the pins (and command the miners): a second copy started by hand
+        # next to the service would fight with it - the pump outputs would jump between the two
+        self._owner_ref = False
+        if not self.simulated:
+            ok, other = owner.acquire()
+            if not ok:
+                self.events.close()
+                raise AlreadyRunning(other)
+            self._owner_ref = True
         # the web port is bound first: a port conflict must not leave a half started controller behind
-        self.web = WebServer(self, host, self.port)
+        try:
+            self.web = WebServer(self, host, self.port)
+        except OSError:
+            if self._owner_ref:
+                owner.release()
+                self._owner_ref = False
+            raise
         self.port = self.web.port
         self.notifier.start()
         self.camera.start()
@@ -167,6 +187,9 @@ class App:
         self.camera.stop()
         self.notifier.stop()
         self.events.close()
+        if getattr(self, "_owner_ref", False):
+            owner.release()
+            self._owner_ref = False
 
     # ---------------------------------------------------------- notifications
     def notify_site(self) -> str:

@@ -880,7 +880,9 @@ export class SettingsView {
         <div class="header-wrap"><div class="pinhdr" id="pinhdr"></div></div>
         <details class="diag"><summary>Hardver diagnosztika</summary><dl class="kv" data-hw="diag"></dl>
           <p class="hint">Ellenőrzés a Pi parancssorából (a láb tényleges állapota): <span class="mono">pinctrl get 17</span> vagy régebbi rendszeren
-            <span class="mono">raspi-gpio get 17</span>. Részletes diagnosztika: <span class="mono">python3 -m rig_supervisor --diagnose</span></p></details>
+            <span class="mono">raspi-gpio get 17</span>. Részletes diagnosztika: <span class="mono">python3 -m rig_supervisor --diagnose</span>.
+            Lábankénti teszt (a szolgáltatás leállítása után): <span class="mono">sudo systemctl stop rig-supervisor</span>, majd
+            <span class="mono">python3 -m rig_supervisor --gpio-test</span></p></details>
       </div>
       ${actions('cb')}</div>`;
     const root = $('#calib');
@@ -967,6 +969,7 @@ export class SettingsView {
       } else {
         html = `<span class="pill ${p.active ? 'on' : 'off'}">${p.active ? 'AKTÍV' : 'inaktív'}</span> <span class="hint">láb: ${lvl(p.level)}</span>`;
       }
+      if (p.warning) html += ` <span class="pill bad" title="${esc(p.warning)}">ÜTKÖZÉS</span> <span class="hint">${esc(p.warning)}</span>`;
       if (simulated) html += ' <span class="pill warn" title="Szimulációs mód: a valódi láb nem változik">szimulált</span>';
       el.innerHTML = html;
     }
@@ -982,6 +985,8 @@ export class SettingsView {
         <dt>Hardver mód</dt><dd>${simulated ? 'szimuláció' : 'valódi hardver'} – ${esc((hw.mode || {}).reason || '')}</dd>
         <dt>GPIO könyvtár</dt><dd>${esc(h.gpio_backend || '—')} ${h.gpio_ok ? '<span class="pill on">OK</span>' : '<span class="pill bad">HIBA</span>'}</dd>
         ${errs.length ? `<dt>Hibák</dt><dd>${errs.map(esc).join('<br>')}</dd>` : ''}
+        <dt>Más futó példány</dt><dd>${(d.instances || []).length ? `<span class="pill bad">${d.instances.length} db</span> ` +
+          d.instances.map((o) => `PID ${o.pid}: <span class="mono">${esc(o.cmd)}</span>`).join('<br>') : 'nincs <span class="pill on">OK</span>'}</dd>
         <dt>Futtató felhasználó</dt><dd>${esc(d.user)} <span class="hint">csoportok: ${esc((d.groups || []).join(', ') || '—')}</span></dd>
         <dt>Eszközfájlok</dt><dd>${Object.entries(d.devices || {}).map(([k, v]) => `<span class="mono">${esc(k)}</span>: ${esc(v)}`).join(' · ')}</dd>
         <dt>Python</dt><dd>${esc(d.python)}</dd>`);

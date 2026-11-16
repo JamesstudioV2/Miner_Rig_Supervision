@@ -43,6 +43,8 @@ CATALOG = {
     "W303": "Áramlásfigyelés kikapcsolva",
     "W304": "Beragadt nyomógomb",
     "W305": "GPIO kimenet: a láb tényleges szintje eltér a kiadottól",
+    "W306": "GPIO láb ütközés: a lábat a rendszer vagy egy másik program is használja",
+    "W307": "Ugráló bemenet (lebegő láb, zaj vagy laza érintkezés)",
     "W401": "Miner nem elérhető",
     "W402": "Miner hibát jelez",
     "W403": "Miner parancs sikertelen",

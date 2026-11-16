@@ -7,15 +7,16 @@
 
 from __future__ import annotations
 
+import collections
 import logging
 import statistics
 import threading
 import time
 
 from ..config import GPIO_TO_PIN, IO_INPUTS, IO_LABELS, IO_OUTPUTS, SENSOR_IDS
-from . import thermistor
-from .adc import ADCError, create_adc
-from .gpio import create_gpio_backend
+from . import owner, thermistor
+from .adc import ADCError, NoADC, create_adc
+from .gpio import NullGPIOBackend, create_gpio_backend
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,10 @@ MISMATCH_AFTER = 3        # consecutive differing read-backs before a mismatch i
 SENSOR_PERIOD_S = 1.0
 EMA_ALPHA = 0.5
 ADC_RETRY_S = 30.0
+OWNER_RETRY_S = 10.0      # a blocked copy checks this often whether the other copy has stopped
+FLAP_WINDOW_S = 60.0      # outputs / inputs that change on their own this often are reported
+OUTPUT_FLAPS = 3          # read-backs differing from the commanded level within the window
+INPUT_FLAPS = 12          # debounced input changes within the window
 
 
 def _polarity_text(active: str) -> str:
@@ -78,6 +83,12 @@ class IOManager:
         self._last_readback = -1e9
         self._out_actual = {}
         self._mismatch = {}
+        self._mismatch_times = {}
+        self._input_changes = {}
+        self.pin_warnings = {}
+        self.owner_blocked = False
+        self._owns_gpio = False
+        self._owner_retry_at = 0.0
         self.adc = None
         self.adc_error = None
         self._adc_cfg_key = None
@@ -105,14 +116,41 @@ class IOManager:
 
     def _open_backend(self) -> None:
         """Create the GPIO backend + ADC for the current mode and configure every pin."""
+        self.owner_blocked = False
+        if not self.use_sim and not self._owns_gpio:
+            ok, other = owner.acquire()
+            if not ok:
+                # another copy of the program drives the pins: never touch them (nor the ADC)
+                self.owner_blocked = True
+                self._owner_retry_at = time.monotonic() + OWNER_RETRY_S
+                log.error("A GPIO vezérlés nem vehető át: %s", other)
+                self.gpio, self.gpio_errors = NullGPIOBackend(other), [other]
+                self.gpio_name = self.gpio.name
+                self.pin_errors, self.pin_warnings = {}, {}
+                self._out_pins, self._in_pins = {}, {}
+                self._out_written, self._raw_levels = {}, {}
+                for name in IO_OUTPUTS + IO_INPUTS:
+                    self.pin_errors[name] = "másik példány vezérli"
+                    if name in IO_INPUTS:
+                        self._debouncers[name] = Debouncer(False, DEBOUNCE_S[name])
+                        self._inputs[name] = False
+                if self.adc is not None:
+                    self.adc.close()
+                self.adc, self.adc_error = NoADC(), "az ADC-t egy másik Rig Supervisor példány használja"
+                self._adc_cfg_key = self._adc_key(self.cfg_store.data)
+                self._adc_retry_at = float("inf")
+                return
+            self._owns_gpio = True
         self.gpio, self.gpio_errors = create_gpio_backend("sim" if self.use_sim else "rpi")
         self.gpio_name = self.gpio.name
+        self.pin_warnings = {}
         if self.sim is not None:
             self.sim.attach_gpio(self.gpio)
         self.pin_errors = {}
         self._out_pins, self._in_pins = {}, {}
         self._out_written, self._raw_levels = {}, {}
         self._out_actual, self._mismatch = {}, {}
+        self._mismatch_times, self._input_changes = {}, {}
         self._last_readback = -1e9
         cfg = self.cfg_store.data
         for name in IO_OUTPUTS:
@@ -142,6 +180,9 @@ class IOManager:
                     self.gpio.close()
                 except Exception as exc:  # noqa: BLE001
                     log.warning("GPIO lezárási hiba: %s", exc)
+            if self._owns_gpio and use_sim:
+                owner.release()
+                self._owns_gpio = False
             self.use_sim, self.sim = bool(use_sim), sim_world
             self._ema = {}
             self._open_backend()
@@ -154,15 +195,30 @@ class IOManager:
             if self.adc:
                 self.adc.close()
             # GPIO outputs are deliberately left untouched (see module docstring of gpio.py)
+            if self._owns_gpio:
+                owner.release()
+                self._owns_gpio = False
 
     @property
     def gpio_ok(self) -> bool:
         return self.gpio is not None and self.gpio.name != "nincs" and not any(
             n in self.pin_errors for n in IO_OUTPUTS)
 
+    def _check_conflict(self, name, pin) -> None:
+        try:
+            other = self.gpio.conflict(pin)
+        except Exception:  # noqa: BLE001 - the check is informative only
+            other = None
+        if other:
+            self.pin_warnings[name] = "GPIO%d: %s" % (pin, other)
+            log.warning("%s (GPIO%d): %s", IO_LABELS[name], pin, other)
+        else:
+            self.pin_warnings.pop(name, None)
+
     def _setup_output(self, name, item):
         pin, active_high = int(item["gpio"]), item["active"] == "high"
         level = self._outputs[name] == active_high
+        self._check_conflict(name, pin)
         try:
             self.gpio.setup_output(pin, level)
             self._out_pins[name] = (pin, active_high)
@@ -181,6 +237,7 @@ class IOManager:
 
     def _setup_input(self, name, item):
         pin, active_low = int(item["gpio"]), item["active"] == "low"
+        self._check_conflict(name, pin)
         try:
             self.gpio.setup_input(pin, item.get("pull", "off"))
             self._in_pins[name] = (pin, active_low)
@@ -252,7 +309,7 @@ class IOManager:
 
     # ------------------------------------------------------- live reconfigure
     def _on_config_change(self, old, new):
-        if self.gpio is None:
+        if self.gpio is None or self.owner_blocked:
             return
         with self._lock:
             old_io, new_io = old["hardware"]["io"], new["hardware"]["io"]
@@ -326,10 +383,32 @@ class IOManager:
                 if changed is not None:
                     self._inputs[name] = changed
                     edges.append((name, changed))
+                    times = self._input_changes.setdefault(name, collections.deque())
+                    times.append(now)
+                    while times and now - times[0] > FLAP_WINDOW_S:
+                        times.popleft()
             return dict(self._inputs), edges
 
     def set_outputs(self, states: dict, now: float) -> None:
         with self._lock:
+            if self.owner_blocked:
+                for name, on in states.items():
+                    self._outputs[name] = bool(on)
+                if now >= self._owner_retry_at:
+                    self._owner_retry_at = now + OWNER_RETRY_S
+                    ok, _other = owner.acquire()
+                    if ok:
+                        self._owns_gpio = True
+                        log.warning("A másik példány leállt – a GPIO vezérlést ez a példány vette át")
+                        self._open_backend()
+                        self.events.add("warning", "A másik Rig Supervisor példány leállt – a GPIO lábak és az ADC "
+                                                   "vezérlését ez a példány vette át", source="hardver")
+                return
+            # read back BEFORE writing: shows what happened to the pins since the last write
+            # (a pin that some other program overwrote in the meantime)
+            if now - self._last_readback >= READBACK_S or now < self._last_readback:
+                self._last_readback = now
+                self._readback()
             reassert = now - self._last_reassert >= REASSERT_S
             if reassert:
                 self._last_reassert = now
@@ -344,6 +423,9 @@ class IOManager:
                 pin, active_high = pin_info
                 try:
                     self.gpio.write(pin, on == active_high)
+                    if self._out_written.get(name) != on and not self.use_sim:
+                        log.info("%s (GPIO%d) -> %s (láb: %d)", IO_LABELS[name], pin, "BE" if on else "KI",
+                                 1 if on == active_high else 0)
                     self._out_written[name] = on
                     if name in self.pin_errors:
                         self.pin_errors.pop(name, None)
@@ -358,9 +440,6 @@ class IOManager:
                         self.pin_errors.pop(name, None)
                     except Exception:  # noqa: BLE001
                         pass
-            if now - self._last_readback >= READBACK_S or now < self._last_readback:
-                self._last_readback = now
-                self._readback()
 
     def _readback(self) -> None:
         """Read the output pins back and count how long they differ from the commanded level."""
@@ -374,10 +453,19 @@ class IOManager:
                 self._out_actual[name], self._mismatch[name] = None, 0
                 continue
             self._out_actual[name] = level
-            if level != (self._outputs[name] == active_high):
+            written = self._out_written.get(name)
+            if written is None:
+                continue
+            if level != (written == active_high):
                 self._mismatch[name] = self._mismatch.get(name, 0) + 1
+                # differs now and then (not continuously): something else writes the pin too
+                times = self._mismatch_times.setdefault(name, collections.deque())
+                times.append(time.monotonic())
             else:
                 self._mismatch[name] = 0
+            times = self._mismatch_times.get(name)
+            while times and time.monotonic() - times[0] > FLAP_WINDOW_S:
+                times.popleft()
 
     def input_error(self, name: str):
         """Setup/read error of an input pin (None when the pin works)."""
@@ -397,7 +485,7 @@ class IOManager:
                 gpio = cfg[name]["gpio"]
                 item = {"gpio": gpio, "pin": GPIO_TO_PIN.get(gpio), "label": IO_LABELS[name],
                         "direction": "out" if name in IO_OUTPUTS else "in",
-                        "error": self.pin_errors.get(name)}
+                        "error": self.pin_errors.get(name), "warning": self.pin_warnings.get(name)}
                 if name in IO_OUTPUTS:
                     on = self._outputs.get(name, False)
                     item["active"] = on
@@ -476,6 +564,7 @@ class IOManager:
             return {k: dict(v) for k, v in self._temps.items()}
 
     def status(self) -> dict:
+        mono = time.monotonic()
         with self._lock:
             return {
                 "sim": self.use_sim,
@@ -488,6 +577,18 @@ class IOManager:
                            "expected": self._outputs[name] == self._out_pins[name][1],
                            "actual": self._out_actual.get(name)}
                     for name, count in self._mismatch.items() if count >= MISMATCH_AFTER and name in self._out_pins},
+                "output_flapping": {
+                    name: {"label": IO_LABELS[name], "gpio": self._out_pins[name][0], "count": len(times)}
+                    for name, times in self._mismatch_times.items()
+                    if len(times) >= OUTPUT_FLAPS and self._mismatch.get(name, 0) < MISMATCH_AFTER
+                    and name in self._out_pins},
+                "input_flapping": {
+                    name: {"label": IO_LABELS[name], "gpio": self._in_pins[name][0], "count": n}
+                    for name, n in ((k, sum(1 for t in v if mono - t <= FLAP_WINDOW_S))
+                                    for k, v in self._input_changes.items())
+                    if n >= INPUT_FLAPS and name in self._in_pins},
+                "pin_warnings": {IO_LABELS[k]: v for k, v in self.pin_warnings.items()},
+                "owner_blocked": self.owner_blocked,
                 "adc": self.adc.name if self.adc else "",
                 "adc_ok": self.adc_error is None,
                 "adc_error": self.adc_error,
